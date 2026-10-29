@@ -26,6 +26,25 @@ logging:
     com.dolphin: DEBUG
 
 dolphin:
+  # ---- 告警自动诊断(M2:alert_task 匹配 → Agent 诊断 → 钉钉通知)----------------
+  alert:
+    dingtalk:
+      # 自定义机器人 webhook(含 access_token);空=通知降级为审计日志(offline 演示无需配置)
+      webhook-url: ${DOLPHIN_DINGTALK_WEBHOOK_URL:}
+      # 机器人"加签"密钥;空=不加签。凭证只从环境变量注入,禁止写死
+      secret: ${DOLPHIN_DINGTALK_SECRET:}
+    # alert_task 目录:按 alertname(+可选 labels 子集)匹配,命中则异步触发 Agent 诊断;
+    # context-template 中 {key} 占位符由告警 labels 渲染(与 deploy/prometheus/alert-rules.yml 的规则对应)
+    tasks:
+      - name: 模型5xx高错误率
+        alert-name: ModelHttp5xxRateHigh
+        product: 模型推理服务
+        context-template: "推理服务持续返回 5xx,uid={uid},model={model},5xx 速率超过 0.1 次/秒,请结合服务状态给出诊断。"
+      - name: 模型限流
+        alert-name: ModelThrottled
+        product: 模型推理服务
+        context-template: "推理服务触发限流,uid={uid},model={model},429 速率超过 0.1 次/秒,请结合配额与服务状态给出诊断。"
+
   approval:
     # 审批令牌有效期(支持 10m/30s 等简写,缺省 10 分钟)
     token-ttl: ${DOLPHIN_APPROVAL_TOKEN_TTL:10m}

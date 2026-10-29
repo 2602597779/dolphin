@@ -52,7 +52,7 @@ public class ScriptedChatModel implements ChatModel {
             return reply(user);
         }
         if (s.contains("质检")) {
-            return "通过\n(offline 桩:演示模式不做真实质检)";
+            return "通过\n(offline 桩:演示模式不做真实质检)\nVERDICT:PASS";
         }
         return "offline 模式:该请求未命中工单演示剧本,桩返回占位回复。";
     }
@@ -92,12 +92,21 @@ public class ScriptedChatModel implements ChatModel {
 
     /**
      * 诊断报告:按工单关键词分剧本,末尾附 PROPOSAL 契约行(结构化动作建议)。
+     * 含"5xx/限流/429"→告警自动诊断剧本(M2 告警链路复用诊断 Agent);
      * 含"重启/连不上"→restartInstance(需审批,进中断);
      * 含"安全组/443"→authorizeSecurityGroup(免审批直执);
      * 其余→PROPOSAL:NONE(无待执行动作,直接结单)。
      */
     private String diagnosis(String user) {
         String u = user == null ? "" : user;
+        if (u.contains("5xx") || u.contains("限流") || u.contains("429")) {
+            return """
+                    【故障摘要】推理服务持续返回 5xx/限流,uid=u-demo 的模型 qwen-plus 调用错误率超过阈值。
+                    【根因分析】1) 上游模型服务过载或实例异常(可能性高);2) 平台配额/限流策略触发(可能性中);3) 客户端流量突增(可能性低)。
+                    【依据】告警上下文显示 5xx/429 速率超过 0.1 次/秒持续触发;任务上下文含具体 uid/model 标识。
+                    【处置建议】建议先在平台侧确认该 uid/model 的配额余量与服务健康状态;如确认为服务实例异常,可对承载实例执行重启恢复;若处置后仍持续则升级人工排查上游依赖。
+                    PROPOSAL:NONE""";
+        }
         if (u.contains("重启") || u.contains("连不上")) {
             return """
                     【故障摘要】ECS 实例 i-abc123 远程连接(SSH/RDP)超时,实例疑似系统夯机。

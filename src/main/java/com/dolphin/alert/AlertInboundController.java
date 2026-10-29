@@ -16,9 +16,9 @@ import java.util.Map;
 /**
  * Alertmanager webhook 接收端:告警链路的入口。
  *
- * <p>处理流程:解析载荷 → 逐条去重 → 首次告警落事件存储并审计。
- * TODO(M2/M3):按 alertname/labels 匹配 alert_task 配置,提取 uid/model 上下文,
- * 触发 Skill 诊断 Agent,诊断结论推送钉钉群——本里程碑先打通"接收-去重-留痕"。
+ * <p>处理流程:解析载荷 → 逐条去重 → 首次告警落事件存储并审计
+ * → 命中 alert_task 的告警提交异步 Agent 诊断(M2:直调 DiagnosisAgent,不走工单图)
+ * → 诊断结论推送钉钉群(未配置 webhook 时降级日志,见 {@link DingTalkNotifier})。
  */
 @RestController
 @RequestMapping("/api/alert")
@@ -29,23 +29,30 @@ public class AlertInboundController {
     private final AlertDeduplicator deduplicator;
     private final AlertEventStore eventStore;
     private final AuditLogger auditLogger;
+    private final AlertDiagnosisService diagnosisService;
+    private final AlertDiagnosisStore diagnosisStore;
 
     public AlertInboundController(AlertDeduplicator deduplicator,
                                   AlertEventStore eventStore,
-                                  AuditLogger auditLogger) {
+                                  AuditLogger auditLogger,
+                                  AlertDiagnosisService diagnosisService,
+                                  AlertDiagnosisStore diagnosisStore) {
         this.deduplicator = deduplicator;
         this.eventStore = eventStore;
         this.auditLogger = auditLogger;
+        this.diagnosisService = diagnosisService;
+        this.diagnosisStore = diagnosisStore;
     }
 
     /** Alertmanager webhook 回调端点(配置在 alertmanager.yml 的 receiver.url) */
     @PostMapping("/webhook")
     public Map<String, Object> webhook(@RequestBody AlertmanagerPayload payload) {
         if (payload == null || payload.alerts() == null || payload.alerts().isEmpty()) {
-            return Map.of("accepted", 0, "duplicated", 0);
+            return Map.of("accepted", 0, "duplicated", 0, "diagnosisScheduled", 0);
         }
         int accepted = 0;
         int duplicated = 0;
+        int scheduled = 0;
         for (AlertmanagerPayload.AlertItem alert : payload.alerts()) {
             if (!deduplicator.acceptIfNew(alert.fingerprint(), alert.startsAt())) {
                 duplicated++;
@@ -57,15 +64,25 @@ public class AlertInboundController {
                     "fingerprint=%s name=%s severity=%s status=%s".formatted(
                             alert.fingerprint(), alert.alertName(), alert.severity(), alert.status()));
             accepted++;
-            // TODO(M2/M3): 匹配 alert_task → 组装诊断上下文 → 触发 Agent 诊断 → 钉钉通知
+            // M2:命中 alert_task 则异步触发 Agent 诊断(未命中仅受理,返回值不阻塞本响应)
+            if (diagnosisService.schedule(alert)) {
+                scheduled++;
+            }
         }
         return Map.of("accepted", accepted, "duplicated", duplicated,
-                "totalAccepted", eventStore.totalAccepted());
+                "totalAccepted", eventStore.totalAccepted(),
+                "diagnosisScheduled", scheduled);
     }
 
     /** 查看最近受理的告警事件(调试/演示) */
     @GetMapping("/events")
     public List<AlertEventStore.AlertEvent> events(@RequestParam(defaultValue = "20") int limit) {
         return eventStore.recent(Math.min(limit, 200));
+    }
+
+    /** 查看最近的告警诊断记录(M2:含诊断报告、动作建议与通知结果) */
+    @GetMapping("/diagnoses")
+    public Map<String, Object> diagnoses(@RequestParam(defaultValue = "20") int limit) {
+        return Map.of("total", diagnosisStore.total(), "records", diagnosisStore.recent(Math.min(limit, 200)));
     }
 }

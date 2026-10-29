@@ -171,3 +171,42 @@ curl.exe -s -X POST http://localhost:8080/api/tickets/submit -H "Content-Type: a
   ```
 
 已知限制：CompiledGraph 单例共享模板 state 的串扰是骨架期 TODO（见 `TicketGraphConfig` 类注释）；`TicketController.submit` 在 invoke 输入中显式清空 `pendingAction`/`finalReply` 残值，保证连续提交多张工单时路由与状态判定不被上一单污染。
+
+## P1 功能补全（告警闭环 / RAG 拼接 / 异步质检 / 人工池）
+
+### 告警自动诊断闭环（M2）
+
+告警链路从"接收-去重-留痕"补全为 **告警受理 → alert_task 匹配 → Agent 诊断 → 钉钉通知**：
+
+- **匹配**（`AlertTaskMatcher` + `dolphin.alert.tasks` 配置）：按 `alertname`（+可选 labels 子集）命中任务，`context-template` 中的 `{uid}`/`{model}` 等占位符由告警 labels 渲染，缺失渲染为 `?`。默认配置对接 `deploy/prometheus/alert-rules.yml` 的 `ModelHttp5xxRateHigh`/`ModelThrottled` 两条规则。
+- **诊断**：直调 `DiagnosisAgent`（不走工单图，规避单例 CompiledGraph 串扰风险），在 `alert-diagnosis` 守护线程池异步执行，webhook 立即返回受理计数。
+- **通知**（`DingTalkNotifier`）：配置 `DOLPHIN_DINGTALK_WEBHOOK_URL`/`DOLPHIN_DINGTALK_SECRET`（加签）即真实推送 markdown；**未配置自动降级为审计日志**，offline 演示无需任何外部依赖。诊断中的动作建议在通知里显式标注"仅供人工决策"，告警侧不自动执行写操作。
+- **查看**：`GET /api/alert/diagnoses?limit=20` 返回诊断记录（报告/动作建议/通知结果），`GET /api/alert/events` 查看受理的告警事件。
+
+手动触发一条告警诊断（无需 Prometheus 栈）：
+
+```bash
+curl -X POST http://localhost:8080/api/alert/webhook -H "Content-Type: application/json" -d '{
+  "alerts": [{"status":"firing","labels":{"alertname":"ModelHttp5xxRateHigh","uid":"u-demo","model":"qwen-plus","severity":"critical"},"annotations":{"summary":"模型 5xx 错误率突增"}}]}'
+# → {"accepted":1,"diagnosisScheduled":1,...}  随后 GET /api/alert/diagnoses 查看诊断结论
+```
+
+### 咨询问答接入 RAG 检索
+
+`kbAnswer` 节点检索的知识片段（`[来源:docId] 内容`）现拼入 user 消息喂给模型，与 `RagQaHandler` 同约定：召回为空显式标注"知识库暂无召回内容"；提示词要求片段已覆盖的严格按片段作答、未覆盖才用产品知识补充，抑制幻觉。结单结论仍回流向量库，形成检索素材闭环。
+
+### 结单后异步质检
+
+结单时在独立线程池异步触发 `QualityAgent` 审查终稿（`VERDICT:PASS/REJECT` 契约行）：REJECT → 工单重开 `ESCALATED` 交人工复核并审计留痕；契约行缺失/多行视为输出不可信，只留痕不重开（质检解析故障不惩罚正常结单）。审计可见 `quality-review` 事件。
+
+### 人工工单池
+
+`escalateHuman` 节点（执行验证失败 / 建议不可信 / 高危超范围）不再返回占位文案，而是落队 `HumanTicketPool` 并在回复中给出升级原因：
+
+```bash
+GET  /api/human-tickets?status=WAITING      # 待办列表(新→旧)
+POST /api/human-tickets/{ticketId}/claim    # 认领 {"owner":"专员A"} → CLAIMED
+POST /api/human-tickets/{ticketId}/resolve  # 完结 {"note":"已恢复"} → RESOLVED 且工单转 CLOSED
+```
+
+非法状态迁移（未认领直接完结、重复认领）返回 409；任务不存在返回 404。池为内存实现，TODO: 持久化与真实人工系统对接。

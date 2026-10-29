@@ -7,7 +7,6 @@ import com.alibaba.cloud.ai.graph.StateGraph;
 import com.alibaba.cloud.ai.graph.exception.GraphStateException;
 import com.dolphin.ticket.agent.DiagnosisAgent;
 import com.dolphin.ticket.agent.KbAnswerAgent;
-import com.dolphin.ticket.agent.QualityAgent;
 import com.dolphin.ticket.agent.ReplyAgent;
 import com.dolphin.ticket.agent.TriageAgent;
 import com.dolphin.ticket.action.ActionExecutor;
@@ -72,14 +71,15 @@ public class TicketGraphConfig {
                                      DiagnosisAgent diagnosisAgent,
                                      KbAnswerAgent kbAnswerAgent,
                                      ReplyAgent replyAgent,
-                                     QualityAgent qualityAgent,
                                      TicketRetriever ticketRetriever,
                                      TicketService ticketService,
                                      ApprovalService approvalService,
                                      ActionRegistry actionRegistry,
                                      ActionExecutor actionExecutor,
                                      TicketCheckpointStore checkpointStore,
-                                     DocIngestService docIngestService) throws GraphStateException {
+                                     DocIngestService docIngestService,
+                                     com.dolphin.ticket.service.QualityReviewService qualityReviewService,
+                                     com.dolphin.ticket.service.HumanTicketPool humanTicketPool) throws GraphStateException {
 
         // 状态工厂:注册所有共享 key 的合并策略;序列化器改用 Jackson(默认 Gson 不在 classpath)
         StateGraph graph = new StateGraph(() -> {
@@ -118,7 +118,7 @@ public class TicketGraphConfig {
             String raw = TicketState.str(state, TicketState.RAW_MESSAGE, "");
             Map<String, Object> classification = TicketState.map(state, TicketState.CLASSIFICATION);
             List<String> similar = ticketRetriever.retrieve(raw, 3);
-            String answer = kbAnswerAgent.answer(raw, classification);
+            String answer = kbAnswerAgent.answer(raw, classification, similar);
             Map<String, Object> out = new HashMap<>();
             out.put(TicketState.REPLY_DRAFT, answer == null ? "" : answer);
             out.put(TicketState.SIMILAR_TICKETS, similar);
@@ -186,7 +186,8 @@ public class TicketGraphConfig {
             } catch (Exception e) {
                 log.warn("[graph] 结单结论回流向量库失败 ticketId={}: {}", ticketId, e.getMessage());
             }
-            // TODO: 结单后异步触发 QualityAgent.review(finalReply) 质检,不合格重开人工复核
+            // 异步质检:结单后审查终稿,不合格重开人工复核(独立线程池,不阻塞结单主链路)
+            qualityReviewService.reviewAsync(ticketId, finalReply);
             return Map.of(TicketState.FINAL_REPLY, finalReply);
         }));
 
@@ -195,9 +196,22 @@ public class TicketGraphConfig {
             String ticketId = TicketState.str(state, TicketState.TICKET_ID, "");
             ticketService.updateStatus(ticketId, TicketService.STATUS_ESCALATED);
             String executeResult = TicketState.str(state, TicketState.EXECUTE_RESULT, "");
-            String finalReply = executeResult.isBlank()
-                    ? "该工单已转人工专员处理,请留意后续回复。(骨架占位,TODO:对接人工工单池)"
-                    : "写操作验证未通过,已转人工专员跟进处理。执行与验证详情:" + executeResult;
+            // 归因:执行未通过 > 建议不可信 > 分诊判定(高危/超范围)
+            String classificationType = String.valueOf(TicketState.map(state, TicketState.CLASSIFICATION)
+                    .getOrDefault("type", ""));
+            String reason = !executeResult.isBlank() ? "处置执行未通过(验证失败或被拒)"
+                    : TicketState.bool(state, TicketState.PROPOSAL_INVALID) ? "诊断动作建议不可信"
+                    : ("高危".equals(classificationType) || "超范围".equals(classificationType))
+                            ? classificationType + "诉求,需人工介入"
+                            : "流程收敛到转人工";
+            String detail = executeResult.isBlank()
+                    ? "原始诉求:" + TicketState.str(state, TicketState.RAW_MESSAGE, "")
+                    : executeResult;
+            // 落人工队列:专员经 /api/human-tickets 认领/完结
+            humanTicketPool.add(ticketId, reason, detail);
+            String finalReply = ("该工单已转人工专员处理(已进入人工队列,工单号 %s,原因:%s),请留意后续回复。"
+                    .formatted(ticketId, reason))
+                    + (executeResult.isBlank() ? "" : "执行与验证详情:" + executeResult);
             return Map.of(TicketState.FINAL_REPLY, finalReply);
         }));
 
