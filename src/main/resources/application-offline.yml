@@ -1,0 +1,8 @@
+# offline 演示 profile:ChatModel/EmbeddingModel 已被桩替换,本文件只为兜底
+# —— 解决 application.yml 中 ${DOLPHIN_API_KEY} 占位符无默认值的启动失败问题。
+# 启动: mvnw spring-boot:run "-Dspring-boot.run.profiles=offline"
+spring:
+  ai:
+    openai:
+      api-key: offline-dummy-key
+      base-url: http://localhost:1

@@ -1,0 +1,20 @@
+# 构建产物
+target/
+*.class
+*.log
+logs/
+
+# IDE 与本地工具
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.codegraph/
+.fixbot-mcp-server/
+.opencode/
+.screenshots/
+
+# 系统
+.DS_Store
+Thumbs.db

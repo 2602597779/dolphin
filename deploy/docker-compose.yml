@@ -1,0 +1,20 @@
+# M1 监控告警仿真层:Prometheus + Alertmanager
+# 用法:docker compose up -d(dolphin 应用需在本机 8080 端口运行)
+# 说明:容器通过 host.docker.internal 访问宿主机上的 dolphin 应用
+services:
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: dolphin-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: dolphin-alertmanager
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro

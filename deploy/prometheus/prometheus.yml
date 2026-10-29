@@ -1,0 +1,18 @@
+# Prometheus 主配置:抓取 dolphin 内 mock 推理服务的指标
+global:
+  scrape_interval: 5s          # 演示用短周期,生产通常 15s~60s
+  evaluation_interval: 5s
+
+rule_files:
+  - alert-rules.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  - job_name: dolphin-mock-model
+    metrics_path: /mock/model/metrics
+    static_configs:
+      - targets: ["host.docker.internal:8080"]   # 宿主机上的 dolphin 应用

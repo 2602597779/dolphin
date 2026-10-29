@@ -1,0 +1,13 @@
+# Alertmanager 路由:全部告警回调 dolphin 的 webhook 接收端
+route:
+  receiver: dolphin-webhook
+  group_by: ["alertname", "uid", "model"]
+  group_wait: 5s          # 演示用短等待
+  group_interval: 30s
+  repeat_interval: 10m    # 同一告警重复推送间隔(dolphin 侧按 fingerprint+startsAt 去重)
+
+receivers:
+  - name: dolphin-webhook
+    webhook_configs:
+      - url: http://host.docker.internal:8080/api/alert/webhook
+        send_resolved: true

@@ -1,0 +1,23 @@
+# 模型服务核心告警规则(对应参考方案的 5xx 与限流两类监控)
+groups:
+  - name: model-alerts
+    rules:
+      - alert: ModelHttp5xxRateHigh
+        expr: sum(rate(model_requests_total{code=~"5.."}[1m])) by (uid, model) > 0.1
+        for: 0s
+        labels:
+          severity: critical
+          type: model-5xx
+        annotations:
+          summary: "模型 5xx 错误率突增: uid={{ $labels.uid }} model={{ $labels.model }}"
+          description: "过去 1 分钟 5xx 速率 {{ $value }} 次/秒,超过阈值 0.1"
+
+      - alert: ModelThrottled
+        expr: sum(rate(model_requests_total{code="429"}[1m])) by (uid, model) > 0.1
+        for: 0s
+        labels:
+          severity: warning
+          type: model-throttle
+        annotations:
+          summary: "模型限流告警: uid={{ $labels.uid }} model={{ $labels.model }}"
+          description: "过去 1 分钟 429 速率 {{ $value }} 次/秒,超过阈值 0.1"

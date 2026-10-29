@@ -1,0 +1,68 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: dolphin
+  ai:
+    openai:
+      # 百炼 Coding Plan 专用 OpenAI 兼容端点(base-url 不带 /v1,Spring AI 会自动拼接)
+      base-url: ${DOLPHIN_BASE_URL:https://coding.dashscope.aliyuncs.com}
+      # API Key 只从环境变量读取,严禁写入本文件(避免提交到 git)
+      api-key: ${DOLPHIN_API_KEY}
+      chat:
+        options:
+          # Coding Plan 套餐内模型,可按控制台支持的列表更换
+          model: ${DOLPHIN_MODEL:qwen3.7-plus}
+      # RAG 用 Embedding 模型(OpenAI 兼容协议走同一 base-url/api-key)。
+      # 注意:若 Coding Plan 端点不支持 /v1/embeddings,把 DOLPHIN_BASE_URL 换成
+      # https://dashscope.aliyuncs.com/compatible-mode/v1 并使用普通 DashScope Key
+      embedding:
+        options:
+          model: ${DOLPHIN_EMBED_MODEL:text-embedding-v4}
+
+logging:
+  level:
+    com.dolphin: DEBUG
+
+dolphin:
+  approval:
+    # 审批令牌有效期(支持 10m/30s 等简写,缺省 10 分钟)
+    token-ttl: ${DOLPHIN_APPROVAL_TOKEN_TTL:10m}
+    # 审批令牌 HMAC 签名密钥:生产环境必须通过环境变量固定配置;
+    # 缺省时启动随机生成临时密钥(进程重启后旧令牌全部失效,启动日志会 WARN)
+    token-secret: ${DOLPHIN_APPROVAL_TOKEN_SECRET:}
+
+  # ---- 云服务数据源(可插拔:模拟器 / HTTP 真实云)----------------------------
+  # 骨架期全部为 mock 值:provider=sim 时根本不读 cloud.* ;provider=http 时
+  # base-url 默认指向本应用自己的 /__mock 端点,无外网即可跑通全链路。
+  cloud:
+    # 数据源实现:sim=进程内模拟器(默认,offline 演示与单测) | http=HTTP 对接真实云/平台网关
+    provider: ${DOLPHIN_CLOUD_PROVIDER:sim}
+    # http 实现的目标根地址;接真实云时把这里换成真实网关
+    base-url: ${DOLPHIN_CLOUD_BASE_URL:http://localhost:8080/__mock}
+    connect-timeout: ${DOLPHIN_CLOUD_CONNECT_TIMEOUT:PT2S}
+    read-timeout: ${DOLPHIN_CLOUD_READ_TIMEOUT:PT10S}
+    retry:
+      # 只对读方法生效;写方法绝不自动重试(避免重复重启/重复退款)
+      read-max-attempts: ${DOLPHIN_CLOUD_READ_MAX_ATTEMPTS:2}
+    auth:
+      # none=不鉴权 | bearer=固定 token | ak-sk=AK/SK 签名
+      mode: ${DOLPHIN_CLOUD_AUTH_MODE:none}
+      # 凭证只从环境变量/密钥服务注入,禁止在此写死明文
+      token: ${DOLPHIN_CLOUD_TOKEN:mock-token}
+      access-key: ${DOLPHIN_CLOUD_AK:}
+      secret-key: ${DOLPHIN_CLOUD_SK:}
+    probe:
+      enabled: ${DOLPHIN_CLOUD_PROBE_ENABLED:true}
+      # PROBE 范式的探测目标兜底主机(真实环境填实例可达地址)
+      target-host: ${DOLPHIN_CLOUD_PROBE_TARGET_HOST:127.0.0.1}
+    paths:
+      # 路径模板集中配置:换网关/换 API 版本只改这里,不动 Java 代码
+      instance: /v1/instances/{instanceId}
+      instance-reboot: /v1/instances/{instanceId}/reboot
+      instance-metrics: /v1/instances/{instanceId}/metrics
+      order-refund: /v1/orders/{orderId}/refund
+      order-refund-latest: /v1/orders/{orderId}/refunds/latest
+      security-group-rules: /v1/security-groups/{sgId}/rules
+      security-group-probe: /v1/security-groups/{sgId}/probe
