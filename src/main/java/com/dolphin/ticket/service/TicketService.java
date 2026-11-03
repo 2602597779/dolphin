@@ -97,11 +97,21 @@ public class TicketService {
         return entities.stream().map(TicketService::toDomain).toList();
     }
 
-    /** 更新工单状态(工单不存在时静默忽略) */
+    /** 更新工单状态(工单不存在时静默忽略);结单落 closed_at 戳,重开清空(再次结单重新计时) */
     public void updateStatus(String id, String status) {
         repository.findById(id).ifPresent(e -> {
             e.setStatus(status);
-            e.setUpdatedAt(Instant.now());
+            Instant now = Instant.now();
+            e.setUpdatedAt(now);
+            if (STATUS_CLOSED.equals(status)) {
+                // 首次结单时间戳为 MTTR 统计口径;重复置 CLOSED 保持首戳不变
+                if (e.getClosedAt() == null) {
+                    e.setClosedAt(now);
+                }
+            } else if (e.getClosedAt() != null) {
+                // 重开(如质检驳回转 ESCALATED/人工重处理):清空结单时间
+                e.setClosedAt(null);
+            }
             repository.save(e);
         });
     }

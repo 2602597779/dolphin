@@ -2,7 +2,10 @@ package com.dolphin.ticket.repo;
 
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
+import org.springframework.data.repository.query.Param;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -30,4 +33,42 @@ public interface TicketRepository extends JpaRepository<TicketEntity, String> {
 
     /** 按状态的全量工单列表(运营视角),按创建时间新→旧 */
     List<TicketEntity> findByStatusOrderByCreatedAtDesc(String status, Pageable pageable);
+
+    // ---- 阶段2:运营指标聚合(跨表 JPQL 在同一持久化单元内下推到 SQL 执行) ----
+
+    /** 状态分布:status → 数量 */
+    @Query("select t.status, count(t) from TicketEntity t group by t.status")
+    List<Object[]> countGroupByStatus();
+
+    /**
+     * 自动化闭环工单数:已结单,且全程无人工介入——未进过人工池(human_task)、
+     * 无审批决策(approval_decision)。即"AI 受理并结单,人未碰过"。
+     */
+    @Query("select count(t) from TicketEntity t where t.status = :closed"
+            + " and t.id not in (select h.ticketId from HumanTaskEntity h)"
+            + " and t.id not in (select a.ticketId from ApprovalDecisionEntity a)")
+    long countAutomatedClosed(@Param("closed") String closed);
+
+    /**
+     * 进过人工环节的工单数:当前处于 ESCALATED(含质检驳回重开、待人工处理),
+     * 或进过人工池。两者取并集,统计"人工升级"触达面。
+     */
+    @Query("select count(t) from TicketEntity t where t.status = :escalated"
+            + " or t.id in (select h.ticketId from HumanTaskEntity h)")
+    long countHumanEscalated(@Param("escalated") String escalated);
+
+    /** 走过审批流的工单数:当前待审批(已中断在 approval 节点),或已有审批决策留痕 */
+    @Query("select count(t) from TicketEntity t where t.status = :pendingApproval"
+            + " or t.id in (select a.ticketId from ApprovalDecisionEntity a)")
+    long countApprovalTouched(@Param("pendingApproval") String pendingApproval);
+
+    /** 已结单且落有结单时间戳的工单(MTTR 统计口径;结单时间戳缺失的老数据不参与) */
+    @Query("select t from TicketEntity t where t.status = :closed and t.closedAt is not null")
+    List<TicketEntity> findClosedWithTimestamp(@Param("closed") String closed);
+
+    /** 创建时间落在 [from, to] 的工单(时间窗口报表) */
+    List<TicketEntity> findByCreatedAtBetween(Instant from, Instant to);
+
+    /** 结单时间落在 [from, to] 的工单(时间窗口内的 MTTR 口径) */
+    List<TicketEntity> findByClosedAtBetween(Instant from, Instant to);
 }

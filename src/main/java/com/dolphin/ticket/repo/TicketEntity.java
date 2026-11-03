@@ -32,11 +32,25 @@ public class TicketEntity {
     @Column(name = "customer_id", length = 64)
     private String customerId;
 
+    /**
+     * 优先级(P1~P4,阶段3 起由分诊产出落库;未分级按业务规则默认 P3,
+     * 老数据 null 在指标聚合时同样按 P3 兜底)。
+     */
+    @Column(name = "priority", length = 8)
+    private String priority;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
+
+    /**
+     * 首次结单时间(MTTR 统计口径):状态流转到 CLOSED 时由台账服务落戳;
+     * 重开(如质检驳回转 ESCALATED)清空,再次结单重新计时。老数据 null 不参与 MTTR。
+     */
+    @Column(name = "closed_at")
+    private Instant closedAt;
 
     protected TicketEntity() {
     }
@@ -47,12 +61,19 @@ public class TicketEntity {
 
     public TicketEntity(String id, String rawMessage, String status, String customerId,
                         Instant createdAt, Instant updatedAt) {
+        this(id, rawMessage, status, customerId, "P3", createdAt, updatedAt, null);
+    }
+
+    public TicketEntity(String id, String rawMessage, String status, String customerId, String priority,
+                        Instant createdAt, Instant updatedAt, Instant closedAt) {
         this.id = id;
         this.rawMessage = rawMessage;
         this.status = status;
         this.customerId = customerId;
+        this.priority = priority;
         this.createdAt = createdAt;
         this.updatedAt = updatedAt;
+        this.closedAt = closedAt;
     }
 
     public String getId() {
@@ -71,6 +92,10 @@ public class TicketEntity {
         return customerId;
     }
 
+    public String getPriority() {
+        return priority;
+    }
+
     public Instant getCreatedAt() {
         return createdAt;
     }
@@ -79,8 +104,20 @@ public class TicketEntity {
         return updatedAt;
     }
 
+    public Instant getClosedAt() {
+        return closedAt;
+    }
+
     public void setStatus(String status) {
         this.status = status;
+    }
+
+    public void setPriority(String priority) {
+        this.priority = priority;
+    }
+
+    public void setClosedAt(Instant closedAt) {
+        this.closedAt = closedAt;
     }
 
     public void setUpdatedAt(Instant updatedAt) {
