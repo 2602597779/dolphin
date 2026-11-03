@@ -32,15 +32,15 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 **业务目标**：工单归属客户，客户只能看自己的单，跨租户访问返回 404/403。
 
 任务拆解：
-- [ ] T1.1 `customer` 表 + `CustomerEntity` + `CustomerRepository`（字段：id、name、apiKey、enabled；启动种子 2 个客户）
-- [ ] T1.2 `ticket` 表加 `customer_id` 列；`TicketService.create` 带归属；实体加字段（Hibernate ddl-auto update 自动加列，老数据 null 不影响）
-- [ ] T1.3 `XApiKeyAuthFilter`（Servlet Filter 或 HandlerInterceptor）：请求头 `X-API-Key` → 解析客户；`/api/tickets/**` 强制鉴权；鉴权失败 401
-- [ ] T1.4 `SubmitRequest` 增加可选 customerId 校验：API-Key 对应客户即归属，不传则用 Key 的客户；无 Key 的接口路径（告警 webhook 等）不受影响
-- [ ] T1.5 `GET /api/tickets/{id}` 做归属校验：非本客户的单返回 404
-- [ ] T1.6 列表接口 `GET /api/tickets?status=&limit=`（只看本客户）——顺带补上真实系统必备的列表查询
-- [ ] T1.7 单测：鉴权过滤器（401/通过/客户隔离）
-- [ ] T1.8 README 剧本更新：两个 API-Key 提交两条工单，互相看不见对方的单
-- [ ] T1.9 测试全绿后 commit（msg: "阶段1:客户/租户模型+API-Key鉴权+工单归属隔离"）
+- [x] T1.1 `customer` 表 + `CustomerEntity` + `CustomerRepository`（字段：id、name、apiKey、enabled；启动种子 2 个客户）——`com/dolphin/customer` 包，`CustomerSeeder` 幂等灌入 cust-001/cust-002
+- [x] T1.2 `ticket` 表加 `customer_id` 列；`TicketService.create` 带归属；实体加字段（Hibernate ddl-auto update 自动加列，老数据 null 不影响）
+- [x] T1.3 `XApiKeyAuthFilter`（OncePerRequestFilter）：请求头 `X-API-Key` → 解析客户；仅 `/api/tickets/**` 强制鉴权；缺失/错误/已吊销统一 401 同文案（防探测）
+- [x] T1.4 归属注入：请求体不携带身份字段，归属只从鉴权上下文（API-Key 对应客户）取，无法伪造；告警 webhook 等运营路径不受影响（实现比原计划更干净）
+- [x] T1.5 `GET /api/tickets/{id}` 做归属校验：非本客户的单返回 404（不泄露存在性）；approve 接口同样校验
+- [x] T1.6 列表接口 `GET /api/tickets?status=&limit=`（只看本客户，新→旧，limit 钳制 1~100）
+- [x] T1.7 单测：`TenantIsolationTest` 9 用例（401/文案一致/注入归属/非工单路径放行/吊销/互相不可见/状态过滤/内部渠道全量/Controller 归属校验）
+- [x] T1.8 README 剧本更新：双客户鉴权说明 + 两个 API-Key 互相看不见对方的单
+- [x] T1.9 测试全绿后 commit（msg: "阶段1:客户/租户模型+API-Key鉴权+工单归属隔离"）——`mvn test` 162 用例 0 失败（原 153 + 新增 9，无回归）
 
 **完成标准**：两个不同 API-Key 的客户无法读取对方工单；`mvn test` 全绿；README 有双客户剧本。
 
@@ -88,15 +88,23 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 
 ## 当前断点（每次会话结束必须更新）
 
-**最后更新**：2026-11-03
-**已完成**：H0~H3 全部完成（刷题代码已删、.trae/ 已忽略、P0 持久化改造已 commit、mvn compile 验证通过）
-**下一步**：阶段 1 客户/租户模型 + API-Key 鉴权，从 T1.1 开始
-**git 状态**：P0 改造+清理合并为一个 commit，PLAN.md 单独 commit；此后工作区应保持干净
+**最后更新**：2026-11-03（第二次会话收尾）
+**已完成**：H0~H3；**阶段 1 全部完成**（客户/租户模型 + API-Key 鉴权 + 工单归属隔离 + 列表接口，`mvn test` 162 用例 0 失败，已 commit）
+**下一步**：阶段 2 运营指标 API，从 T2.1（`MetricsService`）开始
+**git 状态**：阶段 1 改动 + PLAN.md 勾选更新各自入库后，工作区应保持干净
 
 ### 已提交的进度凭证（git log 摘要）
 
 - `P0:状态全落库+并发串扰根治+离线演示链路`（H2 全部 P0 改造 + H0/H1/H3 清理顺带入库）
 - `docs: 新增企业化改造计划(PLAN.md)断点续传文档`（本文件）
+- `阶段1:客户/租户模型+API-Key鉴权+工单归属隔离`（customer 包 + ApiKeyAuthFilter + Ticket 归属/列表 + TenantIsolationTest 9 用例 + README 双客户剧本）
+
+### 阶段 1 关键落点（面试话术/后续阶段引用）
+
+- 演示租户：cust-001（Key `ak-demo-cust-001`）/ cust-002（Key `ak-demo-cust-002`），`CustomerSeeder` 启动幂等灌入
+- 鉴权：`X-API-Key` 头 → `ApiKeyAuthFilter`（仅拦 `/api/tickets/**`）→ request attribute 注入 customerId；缺失/错误/已吊销统一 401 同文案
+- 隔离：`TicketService.getForCustomer/listForCustomer`；`ticket.customer_id=null` 表示内部渠道（告警自动开单/历史数据），内部直调全量可见
+- 审批接口 `/api/tickets/{id}/approve` 同样做归属校验（他客户的单 404，不能代审）
 
 ### 会话恢复指引（新会话照此操作）
 
