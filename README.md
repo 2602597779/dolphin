@@ -21,12 +21,41 @@ mvn -q package -DskipTests; java -jar target\dolphin-0.0.1-SNAPSHOT.jar --spring
 
 > 提示：Windows PowerShell 下 curl 内联中文 JSON 易踩编码坑，建议把请求体存为 **UTF-8（无 BOM）** 文件后用 `--data-binary "@文件"` 发送。以下输出均为本机真实运行结果。
 
+### 鉴权（租户模型）：所有 /api/tickets 请求须携带 X-API-Key
+
+启动时自动灌入两个演示租户（生产环境由客户入驻流程发钥，demo key 仅限离线演示）：
+
+| 客户 | API-Key |
+|---|---|
+| 海豚云客户A | `ak-demo-cust-001` |
+| 海豚云客户B | `ak-demo-cust-002` |
+
+无 Key / 错误 Key / 已吊销 Key 统一返回 `401`（不区分文案，避免 key 探测）；工单按客户归属隔离：**A 查不到 B 的工单（404 不泄露存在性）**，列表接口只看本客户。以下剧本均以客户A 的 Key 发起。
+
+```bash
+# 无 Key 访问被拒:
+curl.exe -s -X POST http://localhost:8080/api/tickets/submit -H "Content-Type: application/json" --data-binary "@body1.json"
+# → {"error":"认证失败:请提供有效的 X-API-Key"}   (HTTP 401)
+
+# 客户A 提交(带 Key),随后客户B 查不到这条单:
+curl.exe -s -X POST http://localhost:8080/api/tickets/submit -H "X-API-Key: ak-demo-cust-001" -H "Content-Type: application/json" --data-binary "@body1.json"
+# → {"ticketId":"T...","status":"CLOSED",...}
+curl.exe -s http://localhost:8080/api/tickets/{ticketId} -H "X-API-Key: ak-demo-cust-002"
+# → {"error":"工单不存在: T..."}   (HTTP 404,租户隔离生效)
+
+# 客户A 看自己的工单列表(新→旧,可按状态过滤):
+curl.exe -s "http://localhost:8080/api/tickets?limit=20" -H "X-API-Key: ak-demo-cust-001"
+# → {"tickets":[{"ticketId":"T...","status":"CLOSED"},...],"count":N}
+```
+
+说明：告警 webhook、人工工单池、指标等运营侧接口位于内部网络边界，不走客户鉴权。
+
 ### 剧本 1：咨询 → 知识问答 → 直接结单
 
 请求（`body1.json`）：
 
 ```bash
-curl.exe -s -X POST http://localhost:8080/api/tickets/submit -H "Content-Type: application/json" --data-binary "@body1.json"
+curl.exe -s -X POST http://localhost:8080/api/tickets/submit -H "X-API-Key: ak-demo-cust-001" -H "Content-Type: application/json" --data-binary "@body1.json"
 ```
 
 ```json
@@ -52,7 +81,7 @@ curl.exe -s -X POST http://localhost:8080/api/tickets/submit -H "Content-Type: a
 提交（`body2.json`）：
 
 ```bash
-curl.exe -s -X POST http://localhost:8080/api/tickets/submit -H "Content-Type: application/json" --data-binary "@body2.json"
+curl.exe -s -X POST http://localhost:8080/api/tickets/submit -H "X-API-Key: ak-demo-cust-001" -H "Content-Type: application/json" --data-binary "@body2.json"
 ```
 
 ```json
@@ -74,7 +103,7 @@ curl.exe -s -X POST http://localhost:8080/api/tickets/submit -H "Content-Type: a
 审批前查询（GET 看到"待审批"）：
 
 ```bash
-curl.exe -s http://localhost:8080/api/tickets/TMVRH8GMR
+curl.exe -s http://localhost:8080/api/tickets/TMVRH8GMR -H "X-API-Key: ak-demo-cust-001"
 ```
 
 ```json
@@ -88,7 +117,7 @@ curl.exe -s http://localhost:8080/api/tickets/TMVRH8GMR
 人工审批通过（`approve.json` 内容 `{"approved":true}`）：
 
 ```bash
-curl.exe -s -X POST http://localhost:8080/api/tickets/TMVRH8GMR/approve -H "Content-Type: application/json" --data-binary "@approve.json"
+curl.exe -s -X POST http://localhost:8080/api/tickets/TMVRH8GMR/approve -H "X-API-Key: ak-demo-cust-001" -H "Content-Type: application/json" --data-binary "@approve.json"
 ```
 
 ```json
@@ -104,7 +133,7 @@ curl.exe -s -X POST http://localhost:8080/api/tickets/TMVRH8GMR/approve -H "Cont
 审批后查询（GET 看到"已结单"）：
 
 ```bash
-curl.exe -s http://localhost:8080/api/tickets/TMVRH8GMR
+curl.exe -s http://localhost:8080/api/tickets/TMVRH8GMR -H "X-API-Key: ak-demo-cust-001"
 ```
 
 ```json
@@ -131,7 +160,7 @@ resume 续跑执行链路的服务端审计日志（证明 restartInstance 真�
 请求（`body3.json`）：
 
 ```bash
-curl.exe -s -X POST http://localhost:8080/api/tickets/submit -H "Content-Type: application/json" --data-binary "@body3.json"
+curl.exe -s -X POST http://localhost:8080/api/tickets/submit -H "X-API-Key: ak-demo-cust-001" -H "Content-Type: application/json" --data-binary "@body3.json"
 ```
 
 ```json
@@ -201,14 +230,14 @@ curl.exe -s -X POST http://localhost:8080/api/tickets/submit -H "Content-Type: a
 
 ```bash
 # 1. offline 启动后提交"重启"工单 → 诊断给出 restartInstance 建议 → 图在 approval 前中断
-curl -X POST http://localhost:8080/api/tickets/submit -H "Content-Type: application/json" \
+curl -X POST http://localhost:8080/api/tickets/submit -H "X-API-Key: ak-demo-cust-001" -H "Content-Type: application/json" \
      -d '{"message":"ECS 服务器 i-abc123 连不上了,请帮我重启实例恢复"}'
 # → {"ticketId":"T...","status":"PENDING_APPROVAL",...}   记下 ticketId
 
 # 2. 直接杀掉进程，重新启动（offline 模式同落库 ./data/dolphin）
 
 # 3. 审批续跑：从 DB checkpoint 水合图状态，批准后自动走完 重启→验证→结单
-curl -X POST http://localhost:8080/api/tickets/{ticketId}/approve -H "Content-Type: application/json" \
+curl -X POST http://localhost:8080/api/tickets/{ticketId}/approve -H "X-API-Key: ak-demo-cust-001" -H "Content-Type: application/json" \
      -d '{"approved":true,"approver":"ops","reason":"重启验收"}'
 # → status:CLOSED，finalReply 含"已向云平台提交实例 i-abc123 … 处理结果"
 ```

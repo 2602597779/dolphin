@@ -3,10 +3,12 @@ package com.dolphin.ticket.api;
 import com.alibaba.cloud.ai.graph.CompiledGraph;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
+import com.dolphin.ticket.auth.ApiKeyAuthFilter;
 import com.dolphin.ticket.orchestration.TicketGraphCompiler;
 import com.dolphin.ticket.orchestration.state.TicketState;
 import com.dolphin.ticket.service.ApprovalService;
 import com.dolphin.ticket.service.TicketService;
+import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -16,9 +18,11 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -54,13 +58,15 @@ public class TicketController {
         this.approvalService = approvalService;
     }
 
-    /** 提交工单,同步执行图流程 */
+    /** 提交工单,同步执行图流程;归属取自鉴权上下文(API-Key 对应客户) */
     @PostMapping("/submit")
-    public ResponseEntity<Map<String, Object>> submit(@RequestBody SubmitRequest request) {
+    public ResponseEntity<Map<String, Object>> submit(@RequestBody SubmitRequest request,
+                                                       HttpServletRequest httpRequest) {
         if (request == null || request.message() == null || request.message().isBlank()) {
             return ResponseEntity.badRequest().body(Map.of("error", "message 不能为空"));
         }
-        String ticketId = ticketService.create(request.message());
+        String customerId = currentCustomer(httpRequest);
+        String ticketId = ticketService.create(request.message(), customerId);
         ticketService.updateStatus(ticketId, TicketService.STATUS_RUNNING);
         RunnableConfig config = RunnableConfig.builder().threadId(ticketId).build();
 
@@ -100,10 +106,10 @@ public class TicketController {
         return ResponseEntity.ok(buildResponse(ticketId, status, state));
     }
 
-    /** 查询工单 */
+    /** 查询工单(租户隔离:非本客户的单返回 404,不泄露存在性) */
     @GetMapping("/{id}")
-    public ResponseEntity<?> get(@PathVariable String id) {
-        return ticketService.get(id)
+    public ResponseEntity<?> get(@PathVariable String id, HttpServletRequest httpRequest) {
+        return ticketService.getForCustomer(id, currentCustomer(httpRequest))
                 .<ResponseEntity<?>>map(t -> ResponseEntity.ok(Map.of(
                         "ticketId", t.id(),
                         "rawMessage", t.rawMessage(),
@@ -112,11 +118,27 @@ public class TicketController {
                         .body(Map.of("error", "工单不存在: " + id)));
     }
 
-    /** 人工审批:记录决策 → updateState + resume 续跑图 */
+    /** 工单列表(只看本客户的;status 可选过滤,新→旧) */
+    @GetMapping
+    public ResponseEntity<?> list(@RequestParam(required = false) String status,
+                                  @RequestParam(defaultValue = "20") int limit,
+                                  HttpServletRequest httpRequest) {
+        List<Map<String, Object>> tickets = ticketService
+                .listForCustomer(currentCustomer(httpRequest), status, limit)
+                .stream()
+                .map(t -> Map.<String, Object>of(
+                        "ticketId", t.id(),
+                        "status", t.status()))
+                .toList();
+        return ResponseEntity.ok(Map.of("tickets", tickets, "count", tickets.size()));
+    }
+
+    /** 人工审批:记录决策 → updateState + resume 续跑图(仅工单归属人可审批) */
     @PostMapping("/{id}/approve")
     public ResponseEntity<Map<String, Object>> approve(@PathVariable String id,
-                                                       @RequestBody ApproveRequest request) {
-        Optional<TicketService.Ticket> ticket = ticketService.get(id);
+                                                      @RequestBody ApproveRequest request,
+                                                      HttpServletRequest httpRequest) {
+        Optional<TicketService.Ticket> ticket = ticketService.getForCustomer(id, currentCustomer(httpRequest));
         if (ticket.isEmpty()) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
                     .body(Map.of("error", "工单不存在: " + id));
@@ -156,6 +178,11 @@ public class TicketController {
                 ? ticketService.get(id).map(TicketService.Ticket::status).orElse(TicketService.STATUS_RUNNING)
                 : ticketService.get(id).map(TicketService.Ticket::status).orElse(TicketService.STATUS_CLOSED);
         return ResponseEntity.ok(buildResponse(id, status, state));
+    }
+
+    /** 从鉴权上下文取当前客户;HTTP 链路由 ApiKeyAuthFilter 写入,直调(单测)为 null=内部渠道 */
+    private String currentCustomer(HttpServletRequest request) {
+        return request == null ? null : (String) request.getAttribute(ApiKeyAuthFilter.CUSTOMER_ID_ATTR);
     }
 
     /** 统一组装响应 */

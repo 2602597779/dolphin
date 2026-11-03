@@ -25,6 +25,13 @@ public class TicketEntity {
     @Column(name = "status", nullable = false, length = 32)
     private String status;
 
+    /**
+     * 归属客户(租户隔离键):null = 内部渠道(告警自动开单/历史数据),
+     * 客户侧 API 一律按本字段校验归属。
+     */
+    @Column(name = "customer_id", length = 64)
+    private String customerId;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
@@ -35,9 +42,15 @@ public class TicketEntity {
     }
 
     public TicketEntity(String id, String rawMessage, String status, Instant createdAt, Instant updatedAt) {
+        this(id, rawMessage, status, null, createdAt, updatedAt);
+    }
+
+    public TicketEntity(String id, String rawMessage, String status, String customerId,
+                        Instant createdAt, Instant updatedAt) {
         this.id = id;
         this.rawMessage = rawMessage;
         this.status = status;
+        this.customerId = customerId;
         this.createdAt = createdAt;
         this.updatedAt = updatedAt;
     }
@@ -52,6 +65,10 @@ public class TicketEntity {
 
     public String getStatus() {
         return status;
+    }
+
+    public String getCustomerId() {
+        return customerId;
     }
 
     public Instant getCreatedAt() {

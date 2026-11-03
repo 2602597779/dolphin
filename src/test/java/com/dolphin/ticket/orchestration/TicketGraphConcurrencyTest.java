@@ -7,6 +7,7 @@ import com.dolphin.ticket.service.TicketService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.test.context.ActiveProfiles;
 
 import java.util.List;
@@ -118,11 +119,11 @@ class TicketGraphConcurrencyTest {
         }
     }
 
-    /** 等闸门后提交重启剧本工单,返回响应体 */
+    /** 等闸门后提交重启剧本工单,返回响应体(直调传 Mock 请求=内部渠道,不走 HTTP 鉴权) */
     private Map<String, Object> submitAfter(CountDownLatch gate) {
         awaitGate(gate);
         return ticketController
-                .submit(new TicketController.SubmitRequest(RESTART_MESSAGE))
+                .submit(new TicketController.SubmitRequest(RESTART_MESSAGE), new MockHttpServletRequest())
                 .getBody();
     }
 
@@ -130,7 +131,8 @@ class TicketGraphConcurrencyTest {
     private Map<String, Object> approveAfter(CountDownLatch gate, String ticketId) {
         awaitGate(gate);
         return ticketController
-                .approve(ticketId, new TicketController.ApproveRequest(true, "conc-test", "并发回归自动审批"))
+                .approve(ticketId, new TicketController.ApproveRequest(true, "conc-test", "并发回归自动审批"),
+                        new MockHttpServletRequest())
                 .getBody();
     }
 
