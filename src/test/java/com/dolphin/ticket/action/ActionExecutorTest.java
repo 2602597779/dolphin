@@ -2,9 +2,13 @@ package com.dolphin.ticket.action;
 
 import com.dolphin.cloud.CloudApiProperties;
 import com.dolphin.ticket.infra.audit.AuditLogger;
+import com.dolphin.ticket.repo.ActionIdempotencyRepository;
+import com.dolphin.ticket.repo.ApprovalTokenNonceRepository;
 import com.dolphin.ticket.service.CloudApiService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -14,8 +18,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * 动作执行器统一管线:白名单→审批令牌门禁→幂等→提交→验证。
+ * P0 起幂等表与 nonce 表落库(真实 H2 内存库)。
  */
+@DataJpaTest
 class ActionExecutorTest {
+
+    @Autowired
+    private ActionIdempotencyRepository idempotencyRepository;
+
+    @Autowired
+    private ApprovalTokenNonceRepository nonceRepository;
 
     private ActionExecutor executor;
     private ApprovalTokenService tokenService;
@@ -26,7 +38,8 @@ class ActionExecutorTest {
         final List<String> lines = new ArrayList<>();
 
         CapturingAuditLogger() {
-            super(new CloudApiProperties());
+            // log 已被覆写,审计 repo 不会触达,以 null 构造
+            super(new CloudApiProperties(), null);
         }
 
         @Override
@@ -37,11 +50,11 @@ class ActionExecutorTest {
 
     @BeforeEach
     void setUp() {
-        tokenService = new ApprovalTokenService(Duration.ofMinutes(10), "test-secret");
+        tokenService = new ApprovalTokenService(Duration.ofMinutes(10), "test-secret", nonceRepository);
         audit = new CapturingAuditLogger();
         CloudApiService cloud = new CloudApiService();
         ResultVerifier verifier = new ResultVerifier(Duration.ofMillis(30), Duration.ofMillis(500), cloud);
-        executor = new ActionExecutor(new ActionRegistry(), cloud, audit, tokenService, verifier);
+        executor = new ActionExecutor(new ActionRegistry(), cloud, audit, tokenService, verifier, idempotencyRepository);
     }
 
     private ActionProposal proposal(String action, String target) {

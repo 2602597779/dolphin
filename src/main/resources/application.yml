@@ -4,6 +4,17 @@ server:
 spring:
   application:
     name: dolphin
+  # ---- 持久化:默认 H2 文件模式(./data/dolphin),零外部依赖即落库;生产切 mysql profile ----
+  datasource:
+    url: jdbc:h2:file:./data/dolphin
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      # 骨架期由 Hibernate 建表;生产建议切换 Flyway 管理 schema
+      ddl-auto: update
+    open-in-view: false
   ai:
     openai:
       # 百炼 Coding Plan 专用 OpenAI 兼容端点(base-url 不带 /v1,Spring AI 会自动拼接)
@@ -85,3 +96,15 @@ dolphin:
       order-refund-latest: /v1/orders/{orderId}/refunds/latest
       security-group-rules: /v1/security-groups/{sgId}/rules
       security-group-probe: /v1/security-groups/{sgId}/probe
+
+---
+# ---- 生产 profile:mysql(-Dspring.profiles.active=mysql 激活,覆盖默认 H2 数据源)----
+spring:
+  config:
+    activate:
+      on-profile: mysql
+  datasource:
+    url: jdbc:mysql://${DOLPHIN_DB_HOST:localhost}:3306/${DOLPHIN_DB_NAME:dolphin}?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    username: ${DOLPHIN_DB_USER:root}
+    password: ${DOLPHIN_DB_PASSWORD:}

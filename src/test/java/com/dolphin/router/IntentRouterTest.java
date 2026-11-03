@@ -6,12 +6,14 @@ import com.dolphin.router.matcher.ExactMatcher;
 import com.dolphin.router.matcher.KeywordMatcher;
 import com.dolphin.router.matcher.RegexMatcher;
 import com.dolphin.router.matcher.StickySessionMatcher;
+import com.dolphin.ticket.infra.audit.AuditLogRepository;
 import com.dolphin.ticket.infra.audit.AuditLogger;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 /**
  * 路由器:责任链顺序(首个命中即停)与全链未命中兜底。
@@ -22,13 +24,13 @@ class IntentRouterTest {
     private final CapabilityRegistry registry = new CapabilityRegistry(
             List.of(TestHandlers.chat(), TestHandlers.ragQa(), TestHandlers.ticketFlow()));
 
-    /** 与生产 @Order 顺序一致:粘性 → 精确 → 正则 → 关键词 */
+    /** 与生产 @Order 顺序一致:粘性 → 精确 → 正则 → 关键词;审计 repo 为 mock(路由打点无需真实落库) */
     private final IntentRouter router = new IntentRouter(List.of(
             new StickySessionMatcher(),
             new ExactMatcher(registry),
             new RegexMatcher(registry),
             new KeywordMatcher(registry)),
-            new AuditLogger(new CloudApiProperties()));
+            new AuditLogger(new CloudApiProperties(), mock(AuditLogRepository.class)));
 
     @Test
     void 精确短语优先于正则与关键词() {

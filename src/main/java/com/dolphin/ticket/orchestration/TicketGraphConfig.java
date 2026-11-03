@@ -1,7 +1,5 @@
 package com.dolphin.ticket.orchestration;
 
-import com.alibaba.cloud.ai.graph.CompileConfig;
-import com.alibaba.cloud.ai.graph.CompiledGraph;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.StateGraph;
 import com.alibaba.cloud.ai.graph.exception.GraphStateException;
@@ -12,7 +10,6 @@ import com.dolphin.ticket.agent.TriageAgent;
 import com.dolphin.ticket.action.ActionExecutor;
 import com.dolphin.ticket.action.ActionProposal;
 import com.dolphin.ticket.action.ActionRegistry;
-import com.dolphin.ticket.memory.TicketCheckpointStore;
 import com.dolphin.ticket.rag.DocIngestService;
 import com.dolphin.ticket.rag.TicketRetriever;
 import com.dolphin.ticket.service.ApprovalService;
@@ -45,11 +42,12 @@ import static com.alibaba.cloud.ai.graph.action.AsyncNodeAction.node_async;
  *       对状态的更新(state.approved 为 null),但某节点返回的 key 对后续节点与条件边可见。
  *       因此 approval 节点从 ApprovalService(按工单号)读取决策并写回 APPROVED key,批准时同步签发
  *       一次性审批令牌;execute 节点从 ApprovalService 取令牌传入 ActionExecutor,门禁凭令牌放行;</li>
- *   <li>checkpoint(MemorySaver,按 threadId=工单号隔离)充当会话记忆,支撑中断-恢复。</li>
+ *   <li>checkpoint(DB saver,按 threadId=工单号隔离)充当会话记忆,支撑中断-恢复。</li>
  * </ul>
  *
- * <p>TODO 并发风险:CompiledGraph 单例的模板 state 跨请求共享,并发处理不同工单时
- * 节点读到的输入 key 可能串扰;骨架阶段可接受,生产需按请求编译图或升级 graph-core 版本验证。
+ * <p>并发根治(P0 阶段二):本配置只暴露 {@link StateGraph} 图定义 bean(无状态,可共享),
+ * 编译收敛到 {@link TicketGraphCompiler#compile()}——每请求新建 CompiledGraph,
+ * 各请求持有独立模板 state,彻底消除单例 CompiledGraph 共享模板的跨请求串扰。
  */
 @Configuration
 public class TicketGraphConfig {
@@ -67,19 +65,18 @@ public class TicketGraphConfig {
     public static final String NODE_ESCALATE = "escalateHuman";
 
     @Bean
-    public CompiledGraph ticketGraph(TriageAgent triageAgent,
-                                     DiagnosisAgent diagnosisAgent,
-                                     KbAnswerAgent kbAnswerAgent,
-                                     ReplyAgent replyAgent,
-                                     TicketRetriever ticketRetriever,
-                                     TicketService ticketService,
-                                     ApprovalService approvalService,
-                                     ActionRegistry actionRegistry,
-                                     ActionExecutor actionExecutor,
-                                     TicketCheckpointStore checkpointStore,
-                                     DocIngestService docIngestService,
-                                     com.dolphin.ticket.service.QualityReviewService qualityReviewService,
-                                     com.dolphin.ticket.service.HumanTicketPool humanTicketPool) throws GraphStateException {
+    public StateGraph ticketStateGraph(TriageAgent triageAgent,
+                                       DiagnosisAgent diagnosisAgent,
+                                       KbAnswerAgent kbAnswerAgent,
+                                       ReplyAgent replyAgent,
+                                       TicketRetriever ticketRetriever,
+                                       TicketService ticketService,
+                                       ApprovalService approvalService,
+                                       ActionRegistry actionRegistry,
+                                       ActionExecutor actionExecutor,
+                                       DocIngestService docIngestService,
+                                       com.dolphin.ticket.service.QualityReviewService qualityReviewService,
+                                       com.dolphin.ticket.service.HumanTicketPool humanTicketPool) throws GraphStateException {
 
         // 状态工厂:注册所有共享 key 的合并策略;序列化器改用 Jackson(默认 Gson 不在 classpath)
         StateGraph graph = new StateGraph(() -> {
@@ -269,11 +266,7 @@ public class TicketGraphConfig {
         graph.addEdge(NODE_FOLLOWUP, StateGraph.END);
         graph.addEdge(NODE_ESCALATE, StateGraph.END);
 
-        // 编译:approval 前中断等待人工 + 内存 checkpoint(会话记忆)
-        CompileConfig compileConfig = CompileConfig.builder()
-                .saverConfig(checkpointStore.saverConfig())
-                .interruptBefore(NODE_APPROVAL)
-                .build();
-        return graph.compile(compileConfig);
+        // 只构建图定义;编译收敛到 TicketGraphCompiler(每请求新建 CompiledGraph,并发根治)
+        return graph;
     }
 }

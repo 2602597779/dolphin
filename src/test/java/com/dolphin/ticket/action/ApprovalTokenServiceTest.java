@@ -1,7 +1,10 @@
 package com.dolphin.ticket.action;
 
+import com.dolphin.ticket.repo.ApprovalTokenNonceRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -12,16 +15,21 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * 审批令牌服务:签发→校验→一次性消费全链路,覆盖防伪/绑定/时效/重放四类拒绝路径。
+ * P0 起 nonce 消费落库(真实 H2 内存库),重放防护语义由 DB 唯一主键兜底。
  */
+@DataJpaTest
 class ApprovalTokenServiceTest {
 
     private static final String SECRET = "unit-test-secret";
+
+    @Autowired
+    private ApprovalTokenNonceRepository nonceRepository;
 
     private ApprovalTokenService service;
 
     @BeforeEach
     void setUp() {
-        service = new ApprovalTokenService(Duration.ofMinutes(10), SECRET);
+        service = new ApprovalTokenService(Duration.ofMinutes(10), SECRET, nonceRepository);
     }
 
     private ActionProposal proposal(String action, String target) {
@@ -84,7 +92,7 @@ class ApprovalTokenServiceTest {
 
     @Test
     void 过期令牌被拒() throws InterruptedException {
-        var shortLived = new ApprovalTokenService(Duration.ofMillis(50), SECRET);
+        var shortLived = new ApprovalTokenService(Duration.ofMillis(50), SECRET, nonceRepository);
         var p = proposal("restartInstance", "i-abc");
         String token = shortLived.issue("t-1", p);
         Thread.sleep(120);

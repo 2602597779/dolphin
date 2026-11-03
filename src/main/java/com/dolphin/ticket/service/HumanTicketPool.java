@@ -1,21 +1,21 @@
 package com.dolphin.ticket.service;
 
 import com.dolphin.ticket.infra.audit.AuditLogger;
+import com.dolphin.ticket.repo.HumanTaskEntity;
+import com.dolphin.ticket.repo.HumanTaskRepository;
 import org.springframework.stereotype.Component;
 
-import java.time.OffsetDateTime;
-import java.util.Comparator;
+import java.time.Instant;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 人工工单池(最小实现):图编排的 escalateHuman 节点把转人工工单落队列,
  * 人工专员通过 REST 认领/完结,替代原先的"骨架占位"文案。
  *
  * <p>生命周期:WAITING(待认领)→ CLAIMED(处理中)→ RESOLVED(完结,工单转 CLOSED)。
- * 骨架阶段内存实现,TODO:接数据库持久化与真实人工工单系统(如飞书任务/客服台)。
+ * P0 起落库(H2 文件/mysql profile),重启后人工队列完好;{@link HumanTask} record 保留为对外 DTO。
+ * TODO:接真实人工工单系统(如飞书任务/客服台)。
  */
 @Component
 public class HumanTicketPool {
@@ -24,66 +24,71 @@ public class HumanTicketPool {
     public static final String STATUS_CLAIMED = "CLAIMED";
     public static final String STATUS_RESOLVED = "RESOLVED";
 
-    /** 一条人工任务 */
+    /** 一条人工任务(对外只读 DTO,时间由实体 Instant 序列化为 ISO-8601 字符串) */
     public record HumanTask(String ticketId, String reason, String detail, String status,
                             String owner, String createdAt, String updatedAt) {
     }
 
-    private final Map<String, HumanTask> tasks = new ConcurrentHashMap<>();
+    private final HumanTaskRepository repository;
     private final AuditLogger auditLogger;
     private final TicketService ticketService;
 
-    public HumanTicketPool(AuditLogger auditLogger, TicketService ticketService) {
+    public HumanTicketPool(HumanTaskRepository repository, AuditLogger auditLogger, TicketService ticketService) {
+        this.repository = repository;
         this.auditLogger = auditLogger;
         this.ticketService = ticketService;
     }
 
-    /** 转人工落队列(同工单重复落队以最新一次为准) */
+    /** 转人工落队列(同工单重复落队以最新一次为准:整行覆盖,状态回到 WAITING) */
     public HumanTask add(String ticketId, String reason, String detail) {
-        HumanTask task = new HumanTask(ticketId, reason, detail, STATUS_WAITING, "",
-                OffsetDateTime.now().toString(), OffsetDateTime.now().toString());
-        tasks.put(ticketId, task);
+        Instant now = Instant.now();
+        repository.save(new HumanTaskEntity(ticketId, reason, detail, STATUS_WAITING, "", now, now));
         auditLogger.log(ticketId, "human-pool", "入队 reason=" + reason);
-        return task;
+        return get(ticketId).orElseThrow();
     }
 
-    /** 按 status 过滤,WAITING 优先、按入队时间倒序 */
+    /** 按 status 过滤,按更新时间倒序 */
     public List<HumanTask> list(String status) {
-        return tasks.values().stream()
-                .filter(t -> status == null || status.isBlank() || t.status().equalsIgnoreCase(status))
-                .sorted(Comparator.comparing(HumanTask::updatedAt).reversed())
-                .toList();
+        List<HumanTaskEntity> entities = (status == null || status.isBlank())
+                ? repository.findAllByOrderByUpdatedAtDesc()
+                : repository.findByStatusIgnoreCaseOrderByUpdatedAtDesc(status);
+        return entities.stream().map(HumanTicketPool::toDto).toList();
     }
 
     public Optional<HumanTask> get(String ticketId) {
-        return Optional.ofNullable(tasks.get(ticketId));
+        return repository.findById(ticketId).map(HumanTicketPool::toDto);
     }
 
     /** 认领:WAITING → CLAIMED */
     public Optional<HumanTask> claim(String ticketId, String owner) {
-        HumanTask current = tasks.get(ticketId);
-        if (current == null || !STATUS_WAITING.equals(current.status())) {
-            return Optional.empty();
-        }
-        HumanTask claimed = new HumanTask(ticketId, current.reason(), current.detail(),
-                STATUS_CLAIMED, owner == null || owner.isBlank() ? "anonymous" : owner,
-                current.createdAt(), OffsetDateTime.now().toString());
-        tasks.put(ticketId, claimed);
-        auditLogger.log(ticketId, "human-pool", "认领 owner=" + claimed.owner());
-        return Optional.of(claimed);
+        return repository.findById(ticketId)
+                .filter(e -> STATUS_WAITING.equals(e.getStatus()))
+                .map(e -> {
+                    e.setStatus(STATUS_CLAIMED);
+                    e.setOwner(owner == null || owner.isBlank() ? "anonymous" : owner);
+                    e.setUpdatedAt(Instant.now());
+                    repository.save(e);
+                    auditLogger.log(ticketId, "human-pool", "认领 owner=" + e.getOwner());
+                    return toDto(e);
+                });
     }
 
     /** 完结:CLAIMED → RESOLVED,工单状态转 CLOSED */
     public Optional<HumanTask> resolve(String ticketId, String note) {
-        HumanTask current = tasks.get(ticketId);
-        if (current == null || !STATUS_CLAIMED.equals(current.status())) {
-            return Optional.empty();
-        }
-        HumanTask resolved = new HumanTask(ticketId, current.reason(), current.detail(),
-                STATUS_RESOLVED, current.owner(), current.createdAt(), OffsetDateTime.now().toString());
-        tasks.put(ticketId, resolved);
-        ticketService.updateStatus(ticketId, TicketService.STATUS_CLOSED);
-        auditLogger.log(ticketId, "human-pool", "完结 note=" + (note == null ? "" : note));
-        return Optional.of(resolved);
+        return repository.findById(ticketId)
+                .filter(e -> STATUS_CLAIMED.equals(e.getStatus()))
+                .map(e -> {
+                    e.setStatus(STATUS_RESOLVED);
+                    e.setUpdatedAt(Instant.now());
+                    repository.save(e);
+                    ticketService.updateStatus(ticketId, TicketService.STATUS_CLOSED);
+                    auditLogger.log(ticketId, "human-pool", "完结 note=" + (note == null ? "" : note));
+                    return toDto(e);
+                });
+    }
+
+    private static HumanTask toDto(HumanTaskEntity e) {
+        return new HumanTask(e.getTicketId(), e.getReason(), e.getDetail(), e.getStatus(),
+                e.getOwner(), e.getCreatedAt().toString(), e.getUpdatedAt().toString());
     }
 }

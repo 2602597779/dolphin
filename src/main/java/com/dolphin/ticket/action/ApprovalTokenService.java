@@ -1,8 +1,11 @@
 package com.dolphin.ticket.action;
 
+import com.dolphin.ticket.repo.ApprovalTokenNonceEntity;
+import com.dolphin.ticket.repo.ApprovalTokenNonceRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 
 import javax.crypto.Mac;
@@ -15,7 +18,6 @@ import java.time.Duration;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -34,9 +36,9 @@ import java.util.stream.Collectors;
  * {@code ticketId|action|paramsHash|issuedAt|expiresAt|nonce}(毫秒时间戳;各字段不得含 '|',
  * 工单号与动作名均为受控字符集)。
  *
- * <p>TODO:已消费 nonce 表与签名密钥目前均为内存态——进程重启后旧令牌全部失效(密钥随机重生成)
- * 且同 nonce 理论上可跨重启重放;生产需落库(nonce 去重表 + TTL 清理)并接入密钥管理服务(KMS/Vault),
- * 密钥通过 {@code dolphin.approval.token-secret} 配置注入。
+ * <p>TODO:签名密钥仍为内存态——配置缺省时随机重生成,进程重启后旧令牌全部失效;
+ * 生产需接入密钥管理服务(KMS/Vault),密钥通过 {@code dolphin.approval.token-secret} 配置注入。
+ * 已消费 nonce 表已持久化(见 {@link ApprovalTokenNonceRepository}),固定密钥下重放防护跨重启有效。
  */
 @Service
 public class ApprovalTokenService {
@@ -58,14 +60,14 @@ public class ApprovalTokenService {
     private final Duration ttl;
     private final SecretKeySpec signingKey;
     private final SecureRandom secureRandom = new SecureRandom();
-
-    /** 已消费 nonce → 令牌过期时间(毫秒),用于一次性语义 + 过期清理;TODO 持久化,见类注释 */
-    private final ConcurrentHashMap<String, Long> consumedNonces = new ConcurrentHashMap<>();
+    private final ApprovalTokenNonceRepository nonceRepository;
 
     public ApprovalTokenService(
             @Value("${dolphin.approval.token-ttl:10m}") Duration ttl,
-            @Value("${dolphin.approval.token-secret:}") String secret) {
+            @Value("${dolphin.approval.token-secret:}") String secret,
+            ApprovalTokenNonceRepository nonceRepository) {
         this.ttl = ttl;
+        this.nonceRepository = nonceRepository;
         if (secret == null || secret.isBlank()) {
             byte[] generated = new byte[SECRET_BYTES];
             secureRandom.nextBytes(generated);
@@ -156,9 +158,14 @@ public class ApprovalTokenService {
             return ValidationResult.fail("令牌已过期(过期时间=" + expiresAt + ",当前=" + now + ")");
         }
 
-        // 一次性消费:putIfAbsent 保证并发下同一 nonce 只有一个调用方成功
-        Long prev = consumedNonces.putIfAbsent(nonce, expiresAt);
-        if (prev != null) {
+        // 一次性消费:nonce 落库(纯插入语义)。先查重快速拒绝;并发下双插以唯一主键约束兜底
+        if (nonceRepository.existsById(nonce)) {
+            return ValidationResult.fail("令牌已被消费(重放拒绝)");
+        }
+        try {
+            // saveAndFlush 立即触发 INSERT,唯一约束冲突在本调用内暴露,保证并发安全
+            nonceRepository.saveAndFlush(new ApprovalTokenNonceEntity(nonce, expiresAt));
+        } catch (DataIntegrityViolationException e) {
             return ValidationResult.fail("令牌已被消费(重放拒绝)");
         }
         long remainSeconds = (expiresAt - now) / 1000;
@@ -211,9 +218,8 @@ public class ApprovalTokenService {
         return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
     }
 
-    /** 清理已过期 nonce(令牌过期后不再需要占位防重放);骨架内存实现,TODO 持久化后改定时任务 */
+    /** 清理已过期 nonce(令牌过期后不再需要占位防重放);校验链路机会式清理,TODO 定时任务 */
     private void purgeExpiredNonces() {
-        long now = System.currentTimeMillis();
-        consumedNonces.entrySet().removeIf(e -> e.getValue() < now);
+        nonceRepository.deleteByExpiresAtBefore(System.currentTimeMillis());
     }
 }

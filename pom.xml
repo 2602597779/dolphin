@@ -59,6 +59,26 @@
             <artifactId>spring-ai-vector-store</artifactId>
         </dependency>
 
+        <!-- JPA + Hibernate:工单台账/审批决策/幂等表/nonce/checkpoint 等状态落库(默认 H2 文件模式) -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+
+        <!-- H2:默认持久化后端(文件模式 ./data/dolphin),零外部依赖即可落库;单测自动配内存库 -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- MySQL 驱动:仅 mysql profile 生产部署使用(runtime,不引入任何默认行为) -->
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>

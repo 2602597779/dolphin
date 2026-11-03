@@ -1,7 +1,10 @@
 package com.dolphin.ticket.service;
 
 import com.dolphin.ticket.infra.audit.AuditLogger;
+import com.dolphin.ticket.repo.HumanTaskRepository;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 
 import java.util.Optional;
 
@@ -14,14 +17,19 @@ import static org.mockito.Mockito.verify;
 /**
  * {@link HumanTicketPool} 生命周期单测:入队 → 认领 → 完结,
  * 以及非法状态迁移(WAITING 直接完结/重复认领/完结后操作)被拒绝。
+ * P0 起任务落库(真实 H2 内存库),同工单重复落队整行覆盖语义由主键 upsert 保证。
  */
+@DataJpaTest
 class HumanTicketPoolTest {
+
+    @Autowired
+    private HumanTaskRepository repository;
 
     private final AuditLogger auditLogger = mock(AuditLogger.class);
     private final TicketService ticketService = mock(TicketService.class);
 
     private HumanTicketPool pool() {
-        return new HumanTicketPool(auditLogger, ticketService);
+        return new HumanTicketPool(repository, auditLogger, ticketService);
     }
 
     @Test

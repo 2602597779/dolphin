@@ -170,7 +170,64 @@ curl.exe -s -X POST http://localhost:8080/api/tickets/submit -H "Content-Type: a
   [AUDIT] action=restartInstance:VERIFY params=通过:第3次轮询观测到本次重启(序号 0→1)后状态 RUNNING,耗时 5s
   ```
 
-已知限制：CompiledGraph 单例共享模板 state 的串扰是骨架期 TODO（见 `TicketGraphConfig` 类注释）；`TicketController.submit` 在 invoke 输入中显式清空 `pendingAction`/`finalReply` 残值，保证连续提交多张工单时路由与状态判定不被上一单污染。
+~~已知限制：CompiledGraph 单例共享模板 state 的串扰~~ 已在 **P0 根治**（每请求编译 + DB checkpoint，`submit` 清残值补丁已删除），见下方 [P0 章节](#p0-持久化--并发根治状态全落库--单例图串扰根治)。
+
+## P0 持久化 + 并发根治（状态全落库 + 单例图串扰根治）
+
+### 状态全落库（默认 H2 文件，零外部依赖）
+
+所有原内存态 store 改为 JPA 落库，store 对外接口不变、调用方零改动。默认数据源 `jdbc:h2:file:./data/dolphin`（`data/` 已加入 `.gitignore`），表清单：
+
+| 表 | 内容 |
+|---|---|
+| `ticket` | 工单台账 |
+| `approval_decision` | 审批决策（留痕不清行，撤销仅置空 token） |
+| `action_idempotency` | 写操作幂等（idem_key=`ticketId|action|target`） |
+| `approval_token_nonce` | 令牌 nonce（唯一约束防重放，并发安全；`purge` 按过期时间删） |
+| `human_task` | 人工工单池 |
+| `graph_checkpoint` | 图执行快照（`node_id` + `next_node`，resume 从 `next_node` 续跑） |
+| `alert_event` / `alert_diagnosis` / `audit_log` | 告警事件（按指纹 upsert）/ 诊断记录 / 审计日志 |
+
+配套持久化：
+
+- **向量库文件**（`dolphin.rag.vector-store-path`，默认 `./data/vector-store.json`）：ingest 后落盘、启动时加载，重启不重新调用 Embedding API；文件已存在则跳过种子灌入。
+- **Checkpoint 落库**：`DbCheckpointSaver` 按 `threadId=工单号` 单行 upsert，重启后全新实例读同一库即可续跑（`JdbcCheckpointSaverTest` 验证往返/覆盖/重启语义）。
+
+### 并发串扰根治
+
+~~CompiledGraph 单例共享模板 state~~ → `TicketGraphCompiler` **每请求编译独立图**（CompileConfig 含 DB saver + approval 中断点），checkpoint 按工单号天然隔离；`submit` 的"清残值"与 `approve` 的"回灌"补丁已删除，invoke 输入只传 `TICKET_ID` + `RAW_MESSAGE`。并发回归 `TicketGraphConcurrencyTest`：双工单同时提交进审批中断 + 同时审批 resume，终态/回复/审批决策互不串扰。
+
+### 重启验收剧本（offline，全程无外部依赖）
+
+```bash
+# 1. offline 启动后提交"重启"工单 → 诊断给出 restartInstance 建议 → 图在 approval 前中断
+curl -X POST http://localhost:8080/api/tickets/submit -H "Content-Type: application/json" \
+     -d '{"message":"ECS 服务器 i-abc123 连不上了,请帮我重启实例恢复"}'
+# → {"ticketId":"T...","status":"PENDING_APPROVAL",...}   记下 ticketId
+
+# 2. 直接杀掉进程，重新启动（offline 模式同落库 ./data/dolphin）
+
+# 3. 审批续跑：从 DB checkpoint 水合图状态，批准后自动走完 重启→验证→结单
+curl -X POST http://localhost:8080/api/tickets/{ticketId}/approve -H "Content-Type: application/json" \
+     -d '{"approved":true,"approver":"ops","reason":"重启验收"}'
+# → status:CLOSED，finalReply 含"已向云平台提交实例 i-abc123 … 处理结果"
+```
+
+重启后台账、幂等键、审批决策、审计日志均在 H2 文件中完好，续跑不重复执行写操作（幂等键拦截）。
+
+### MySQL profile
+
+生产切换：`-Dspring.profiles.active=mysql`，数据源从环境变量读取（业务代码零改动）：
+
+```bash
+DOLPHIN_DB_HOST=rds-xxx.mysql.rds.aliyuncs.com \
+DOLPHIN_DB_NAME=dolphin \
+DOLPHIN_DB_USER=dolphin \
+DOLPHIN_DB_PASSWORD=*** \
+java -jar dolphin.jar --spring.profiles.active=mysql
+```
+
+schema 仍由 Hibernate `ddl-auto: update` 管理，生产建议后续切换 Flyway 管 schema。
 
 ## P1 功能补全（告警闭环 / RAG 拼接 / 异步质检 / 人工池）
 
@@ -209,4 +266,4 @@ POST /api/human-tickets/{ticketId}/claim    # 认领 {"owner":"专员A"} → CLA
 POST /api/human-tickets/{ticketId}/resolve  # 完结 {"note":"已恢复"} → RESOLVED 且工单转 CLOSED
 ```
 
-非法状态迁移（未认领直接完结、重复认领）返回 409；任务不存在返回 404。池为内存实现，TODO: 持久化与真实人工系统对接。
+非法状态迁移（未认领直接完结、重复认领）返回 409；任务不存在返回 404。人工任务已落库（表 `human_task`，P0），重启不丢；TODO: 与真实人工系统对接。

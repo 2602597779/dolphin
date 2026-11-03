@@ -1,9 +1,13 @@
 package com.dolphin.alert;
 
+import com.dolphin.alert.repo.AlertDiagnosisRepository;
 import com.dolphin.ticket.agent.DiagnosisAgent;
 import com.dolphin.ticket.infra.audit.AuditLogger;
 import com.dolphin.ticket.rag.TicketRetriever;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.mockito.Mockito;
 
 import java.util.List;
@@ -25,15 +29,25 @@ import static org.mockito.Mockito.when;
  * 未命中任务不诊断、命中任务产出报告并通知、Agent 失败落 DIAGNOSIS_FAILED、
  * 通知失败不影响诊断结论落库、严重级别映射 urgency。
  */
+@DataJpaTest
 class AlertDiagnosisServiceTest {
 
     private final AlertTaskMatcher taskMatcher = mock(AlertTaskMatcher.class);
     private final DiagnosisAgent diagnosisAgent = mock(DiagnosisAgent.class);
     private final TicketRetriever retriever = mock(TicketRetriever.class);
     private final DingTalkNotifier notifier = mock(DingTalkNotifier.class);
-    private final AlertDiagnosisStore store = new AlertDiagnosisStore();
     private final AuditLogger auditLogger = mock(AuditLogger.class);
     private final Executor directExecutor = Runnable::run;
+
+    @Autowired
+    private AlertDiagnosisRepository diagnosisRepository;
+
+    private AlertDiagnosisStore store;
+
+    @BeforeEach
+    void setUpStore() {
+        store = new AlertDiagnosisStore(diagnosisRepository);
+    }
 
     private AlertDiagnosisService service() {
         return new AlertDiagnosisService(taskMatcher, diagnosisAgent, retriever,

@@ -3,6 +3,7 @@ package com.dolphin.ticket.api;
 import com.alibaba.cloud.ai.graph.CompiledGraph;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
+import com.dolphin.ticket.orchestration.TicketGraphCompiler;
 import com.dolphin.ticket.orchestration.state.TicketState;
 import com.dolphin.ticket.service.ApprovalService;
 import com.dolphin.ticket.service.TicketService;
@@ -41,14 +42,14 @@ public class TicketController {
     public record ApproveRequest(boolean approved, String approver, String reason) {
     }
 
-    private final CompiledGraph ticketGraph;
+    private final TicketGraphCompiler compiler;
     private final TicketService ticketService;
     private final ApprovalService approvalService;
 
-    public TicketController(CompiledGraph ticketGraph,
+    public TicketController(TicketGraphCompiler compiler,
                             TicketService ticketService,
                             ApprovalService approvalService) {
-        this.ticketGraph = ticketGraph;
+        this.compiler = compiler;
         this.ticketService = ticketService;
         this.approvalService = approvalService;
     }
@@ -65,16 +66,11 @@ public class TicketController {
 
         Optional<OverAllState> result;
         try {
-            // TODO: 并发串扰风险见 TicketGraphConfig 类注释(单例 CompiledGraph 共享模板 state)
-            // 最小缓解:提交时显式清空易残留的上一单状态(ReplaceStrategy 覆盖写),
-            // 否则 FINAL_REPLY/PENDING_ACTION/PROPOSAL_INVALID 残值会污染本单路由与状态判定(离线演示连续跑多单必现)
-            result = ticketGraph.invoke(Map.of(
+            // P0 并发根治:每请求独立编译,图模板不再跨请求共享,invoke 只传本单数据即可
+            CompiledGraph graph = compiler.compile();
+            result = graph.invoke(Map.of(
                     TicketState.TICKET_ID, ticketId,
-                    TicketState.RAW_MESSAGE, request.message(),
-                    TicketState.PENDING_ACTION, "",
-                    TicketState.PROPOSAL_INVALID, false,
-                    TicketState.EXECUTE_STATUS, "",
-                    TicketState.FINAL_REPLY, ""), config);
+                    TicketState.RAW_MESSAGE, request.message()), config);
         } catch (Exception e) {
             log.error("工单图执行失败 ticketId={}", ticketId, e);
             ticketService.updateStatus(ticketId, TicketService.STATUS_NEW);
@@ -138,19 +134,17 @@ public class TicketController {
                 request == null ? null : request.reason());
         RunnableConfig config = RunnableConfig.builder().threadId(id).build();
 
-        // graph-core 1.0.0.2 串单修复:节点 action 固定读取 CompiledGraph 单例模板 state
-        // (AsyncNodeGenerator#evaluateAction 传的是模板,checkpoint 数据只用于确定起始节点),
-        // 若提交与审批之间跑过其他工单,模板残留的是他单数据。故 resume 前把本工单
-        // checkpoint 数据回灌模板,保证 approval/execute 节点读到的是本单状态
-        // TODO 根治:按请求编译图(每单独立模板),彻底消除共享模板的并发串扰
         OverAllState state;
         try {
-            ticketGraph.overAllState().input(ticketGraph.getState(config).state().data());
-            ticketGraph.updateState(config, Map.of(TicketState.APPROVED, approved), null);
-            ticketGraph.resume(new OverAllState.HumanFeedback(Map.of("approved", approved), null), config);
-            // resume 返回的快照是独立 state 对象,而节点输出写在共享模板上(见上方串单修复注释),
-            // 终稿/执行结果需从模板读取才完整;resume 同步跑完后模板即本单终态
-            state = ticketGraph.overAllState();
+            // P0 并发根治:每请求独立编译;新图模板为空,先从 DB checkpoint 水合本单状态
+            // (node action 读的是图模板,checkpoint 数据只用于确定续跑起点)
+            CompiledGraph graph = compiler.compile();
+            graph.overAllState().input(graph.getState(config).state().data());
+            graph.updateState(config, Map.of(TicketState.APPROVED, approved), null);
+            graph.resume(new OverAllState.HumanFeedback(Map.of("approved", approved), null), config);
+            // resume 返回的快照是独立 state 对象,节点输出写在本请求独立模板上,
+            // 终稿/执行结果从模板读取;resume 同步跑完后模板即本单终态
+            state = graph.overAllState();
         } catch (Exception e) {
             log.error("工单审批续跑失败 ticketId={}", id, e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)

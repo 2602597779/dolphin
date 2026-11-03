@@ -19,13 +19,20 @@ public class KnowledgeSeeder implements CommandLineRunner {
     private static final Logger log = LoggerFactory.getLogger(KnowledgeSeeder.class);
 
     private final DocIngestService docIngestService;
+    private final VectorStoreFilePersistence persistence;
 
-    public KnowledgeSeeder(DocIngestService docIngestService) {
+    public KnowledgeSeeder(DocIngestService docIngestService, VectorStoreFilePersistence persistence) {
         this.docIngestService = docIngestService;
+        this.persistence = persistence;
     }
 
     @Override
     public void run(String... args) {
+        // 快照已存在(重启场景):load 已恢复全部种子文档与 embedding,跳过灌入避免重复调用 Embedding
+        if (persistence.exists()) {
+            log.info("[rag] 向量库快照已存在,跳过种子灌入(dolphin.rag.vector-store-path)");
+            return;
+        }
         try {
             SEED_DOCS.forEach(docIngestService::ingest);
             log.info("[rag] 种子知识灌入完成,共 {} 篇", SEED_DOCS.size());

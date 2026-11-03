@@ -4,12 +4,16 @@ target/
 *.log
 logs/
 
+# 本地持久化数据(H2 数据库文件 / 向量库快照)
+data/
+
 # IDE 与本地工具
 .idea/
 *.iml
 *.ipr
 *.iws
 .vscode/
+.trae/
 .codegraph/
 .fixbot-mcp-server/
 .opencode/

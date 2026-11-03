@@ -1,11 +1,12 @@
 package com.dolphin.ticket.action;
 
 import com.dolphin.ticket.infra.audit.AuditLogger;
+import com.dolphin.ticket.repo.ActionIdempotencyEntity;
+import com.dolphin.ticket.repo.ActionIdempotencyRepository;
 import com.dolphin.ticket.service.CloudApi;
 import org.springframework.stereotype.Component;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.time.Instant;
 
 /**
  * 动作执行器:写操作链路上唯一的执行入口,LLM 到此为止,以下全是确定性代码。
@@ -24,8 +25,7 @@ import java.util.concurrent.ConcurrentHashMap;
  *   <li>全程审计留痕。</li>
  * </ol>
  *
- * <p>TODO:幂等表换数据库持久化(重启进程后仍可去重);云 API 仍为模拟器(见 CloudApi 默认实现 CloudApiService);
- * 拒绝事件上报风控系统。
+ * <p>TODO:云 API 仍为模拟器(见 CloudApi 默认实现 CloudApiService);拒绝事件上报风控系统。
  */
 @Component
 public class ActionExecutor {
@@ -46,17 +46,17 @@ public class ActionExecutor {
     private final AuditLogger auditLogger;
     private final ApprovalTokenService approvalTokenService;
     private final ResultVerifier resultVerifier;
-
-    /** 幂等去重表:key = ticketId|action|target。骨架内存实现,见类注释 TODO */
-    private final Map<String, Result> executed = new ConcurrentHashMap<>();
+    private final ActionIdempotencyRepository idempotencyRepository;
 
     public ActionExecutor(ActionRegistry registry, CloudApi cloudApiService, AuditLogger auditLogger,
-                          ApprovalTokenService approvalTokenService, ResultVerifier resultVerifier) {
+                          ApprovalTokenService approvalTokenService, ResultVerifier resultVerifier,
+                          ActionIdempotencyRepository idempotencyRepository) {
         this.registry = registry;
         this.cloudApiService = cloudApiService;
         this.auditLogger = auditLogger;
         this.approvalTokenService = approvalTokenService;
         this.resultVerifier = resultVerifier;
+        this.idempotencyRepository = idempotencyRepository;
     }
 
     /**
@@ -88,13 +88,13 @@ public class ActionExecutor {
                     tokenResult.reason() + " target=" + proposal.target());
         }
 
-        // 3. 幂等拦截:重复执行直接返回首次结果,不产生第二次副作用
+        // 3. 幂等拦截:重复执行直接返回首次结果,不产生第二次副作用(幂等表落库,重启后去重依然生效)
         String dedupeKey = ticketId + "|" + desc.name() + "|" + proposal.target();
         if (desc.idempotent()) {
-            Result prev = executed.get(dedupeKey);
-            if (prev != null) {
+            var prev = idempotencyRepository.findById(dedupeKey);
+            if (prev.isPresent()) {
                 auditLogger.log(ticketId, desc.name() + ":SKIPPED", "幂等拦截,已执行过 key=" + dedupeKey);
-                return Result.skipped("同一工单同一动作已执行过,本次跳过(幂等)。首次结果:" + prev.message());
+                return Result.skipped("同一工单同一动作已执行过,本次跳过(幂等)。首次结果:" + prev.get().getResult());
             }
         }
 
@@ -139,7 +139,8 @@ public class ActionExecutor {
                 : Result.verifyFailed("提交:" + submitted + " | 验证失败:" + verification.detail() + " → 转人工跟进");
         // 幂等表记录提交事实(含验证失败):同一工单+动作+目标的副作用只允许发生一次
         if (desc.idempotent()) {
-            executed.put(dedupeKey, result);
+            idempotencyRepository.save(new ActionIdempotencyEntity(
+                    dedupeKey, desc.name(), ticketId, result.message(), Instant.now()));
         }
         return result;
     }

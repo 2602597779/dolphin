@@ -7,6 +7,7 @@ import com.dolphin.capability.CapabilityDescriptor;
 import com.dolphin.capability.CapabilityHandler;
 import com.dolphin.router.DialogContext;
 import com.dolphin.ticket.infra.audit.AuditLogger;
+import com.dolphin.ticket.orchestration.TicketGraphCompiler;
 import com.dolphin.ticket.orchestration.state.TicketState;
 import com.dolphin.ticket.service.ApprovalService;
 import com.dolphin.ticket.service.TicketService;
@@ -36,16 +37,16 @@ public class TicketFlowHandler implements CapabilityHandler {
     private static final List<String> APPROVE_WORDS = List.of("同意", "批准", "确认", "通过", "执行");
     private static final List<String> REJECT_WORDS = List.of("拒绝", "不同意", "驳回", "取消");
 
-    private final CompiledGraph ticketGraph;
+    private final TicketGraphCompiler compiler;
     private final TicketService ticketService;
     private final ApprovalService approvalService;
     private final AuditLogger auditLogger;
 
-    public TicketFlowHandler(CompiledGraph ticketGraph,
+    public TicketFlowHandler(TicketGraphCompiler compiler,
                              TicketService ticketService,
                              ApprovalService approvalService,
                              AuditLogger auditLogger) {
-        this.ticketGraph = ticketGraph;
+        this.compiler = compiler;
         this.ticketService = ticketService;
         this.approvalService = approvalService;
         this.auditLogger = auditLogger;
@@ -78,7 +79,9 @@ public class TicketFlowHandler implements CapabilityHandler {
         ticketService.updateStatus(ticketId, TicketService.STATUS_RUNNING);
         RunnableConfig config = RunnableConfig.builder().threadId(ticketId).build();
         try {
-            Optional<OverAllState> result = ticketGraph.invoke(Map.of(
+            // P0 并发根治:每请求独立编译,与 REST 链路同款
+            CompiledGraph graph = compiler.compile();
+            Optional<OverAllState> result = graph.invoke(Map.of(
                     TicketState.TICKET_ID, ticketId,
                     TicketState.RAW_MESSAGE, message), config);
             return interpretState(ticketId, result.orElse(null), ctx,
@@ -104,9 +107,14 @@ public class TicketFlowHandler implements CapabilityHandler {
         auditLogger.log(ticketId, "chat-approval", approved ? "approved" : "rejected");
         RunnableConfig config = RunnableConfig.builder().threadId(ticketId).build();
         try {
-            ticketGraph.updateState(config, Map.of(TicketState.APPROVED, approved), null);
-            Optional<OverAllState> resumed = ticketGraph.resume(
-                    new OverAllState.HumanFeedback(Map.of("approved", approved), null), config);
+            // P0 并发根治:每请求独立编译;新图模板为空,先从 DB checkpoint 水合本单状态再续跑
+            // (与 TicketController.approve 同款语义:节点 action 读的是图模板,checkpoint 只定续跑起点)
+            CompiledGraph graph = compiler.compile();
+            graph.overAllState().input(graph.getState(config).state().data());
+            graph.updateState(config, Map.of(TicketState.APPROVED, approved), null);
+            graph.resume(new OverAllState.HumanFeedback(Map.of("approved", approved), null), config);
+            // resume 节点输出写在本请求独立模板上,终稿从模板读取
+            Optional<OverAllState> resumed = Optional.of(graph.overAllState());
             String done = approved ? "已批准并执行。" : "已驳回,不执行处置动作。";
             return done + interpretState(ticketId, resumed.orElse(null), ctx,
                     "审批决策已记录,但流程续跑异常,请通过 REST 接口跟进。");
