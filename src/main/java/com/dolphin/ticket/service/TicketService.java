@@ -97,6 +97,15 @@ public class TicketService {
         return entities.stream().map(TicketService::toDomain).toList();
     }
 
+    /** 更新工单优先级(分诊结论落库;工单不存在时静默忽略) */
+    public void updatePriority(String id, String priority) {
+        repository.findById(id).ifPresent(e -> {
+            e.setPriority(priority);
+            e.setUpdatedAt(Instant.now());
+            repository.save(e);
+        });
+    }
+
     /** 更新工单状态(工单不存在时静默忽略);结单落 closed_at 戳,重开清空(再次结单重新计时) */
     public void updateStatus(String id, String status) {
         repository.findById(id).ifPresent(e -> {

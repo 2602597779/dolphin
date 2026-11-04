@@ -15,6 +15,7 @@ import com.dolphin.ticket.rag.TicketRetriever;
 import com.dolphin.ticket.service.ApprovalService;
 import com.dolphin.ticket.service.TicketService;
 import com.dolphin.ticket.orchestration.state.TicketState;
+import com.dolphin.sla.SlaPriorityRules;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
@@ -85,11 +86,18 @@ public class TicketGraphConfig {
             return state;
         }, new TicketStateSerializer());
 
-        // ---- 分诊:原始文本 → 分类结果 ----
+        // ---- 分诊:原始文本 → 分类结果 + SLA 优先级 ----
         graph.addNode(NODE_TRIAGE, node_async(state -> {
             String raw = TicketState.str(state, TicketState.RAW_MESSAGE, "");
+            String ticketId = TicketState.str(state, TicketState.TICKET_ID, "");
             Map<String, Object> classification = triageAgent.classify(raw);
-            log.debug("[graph] triage 结果: {}", classification);
+            // SLA 优先级:分诊结论 + 原文宕机信号的确定性规则推导(不依赖模型自觉),
+            // 随分诊即时落库,支撑 SlaMonitor 超时巡检与指标 API 的优先级分布
+            String priority = SlaPriorityRules.derive(
+                    String.valueOf(classification.getOrDefault("type", "")), raw);
+            classification.put("priority", priority);
+            ticketService.updatePriority(ticketId, priority);
+            log.debug("[graph] triage 结果: {} priority={}", classification, priority);
             return Map.of(TicketState.CLASSIFICATION, classification);
         }));
 

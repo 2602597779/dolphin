@@ -243,9 +243,90 @@ curl.exe -s "http://localhost:8080/api/metrics/tickets?from=2026-11-03T00:00:00Z
 }
 ```
 
-（`byPriority` 暂全为默认 P3，分诊产出 P1~P4 优先级由阶段 3 SLA 改造接入；非法时间参数返回 400。）
+（该输出录制于阶段 3 之前，`byPriority` 全为默认 P3；分诊接入 P1~P4 后，`summary` 会额外返回 `byPriority` 与 `sla` 字段（见剧本 5），此剧本复现时 3 条咨询为 P4、安全组为 P2、重启为 P1。非法时间参数返回 400。）
 
 路由：`GET /api/metrics/** → MetricsService 聚合（JPQL 下推 count/group by + 审计事件分类）`。
+
+### 剧本 5：SLA 优先级与超时自动升级——P1 单卡住 1 分钟，系统自己拉人
+
+优先级为**确定性规则推导**（`SlaPriorityRules`，不依赖模型自觉）：分诊为**故障**且原文含宕机类信号（连不上/宕机/无法连接/不可用等）→ **P1**；普通故障 → **P2**；咨询 → **P4**；高危/超范围等其余类型及未分级老数据 → **P3** 兜底。各级别配双计时器（`dolphin.sla.response/resolve`，响应=产出客户可见回复、解决=CLOSED），`SlaMonitor` 周期巡检；超时一次性动作：落 `ticket.sla_breach_at` 留痕 → 未入池则升级人工池 → 审计 `sla-breach` → 钉钉加急（webhook 未配置自动降级日志，不中断流程）。已留痕工单后续扫描跳过（不重复加急）；已在池中被认领的只加急、不重置处理进度；超时升级只拉人不改工单状态，不阻断审批续跑。
+
+复现（把 P1 解决时限调成 1 分钟、巡检 10 秒，全新数据目录起服）：
+
+```bash
+java -jar target/dolphin-0.0.1-SNAPSHOT.jar --spring.profiles.active=offline --dolphin.sla.resolve.P1=1m --dolphin.sla.scan-interval=10s --dolphin.sla.scan-initial-delay=10s
+```
+
+提交 P1 工单（`body2.json`，含"连不上"宕机信号 → 故障 + P1，重启动作需审批）后**故意不审批**，等约 1 分钟：
+
+```bash
+curl.exe -s -X POST http://localhost:8080/api/tickets/submit -H "X-API-Key: ak-demo-cust-001" -H "Content-Type: application/json" --data-binary "@body2.json"
+# → {"ticketId":"TMW1FPHNH1","status":"PENDING_APPROVAL","pendingAction":"restartInstance:i-abc123",...}
+```
+
+服务端日志（提交后整 1 分钟，巡检线程 `scheduling-1`）：
+
+```text
+09:24:54 [graph] triage 结果: {product=ECS, urgency=高, type=故障, priority=P1} priority=P1
+09:26:02 [AUDIT] ticketId=TMW1FPHNH1 action=human-pool params=入队 reason=SLA超时:RESOLVE(优先级P1,已耗时1分钟,时限1分钟)
+09:26:02 [AUDIT] ticketId=TMW1FPHNH1 action=sla-breach params=SLA超时:RESOLVE(优先级P1,已耗时1分钟,时限1分钟) 已升级人工池
+09:26:02 [alert-notify] 未配置钉钉 webhook,降级日志通知。title=[SLA加急] 工单 TMW1FPHNH1
+### [SLA加急] SLA超时:RESOLVE(优先级P1,已耗时1分钟,时限1分钟)
+- 工单号:TMW1FPHNH1  - 优先级:P1  - 状态:PENDING_APPROVAL
+- 原始诉求:ECS 服务器 i-abc123 连不上了,请帮我重启实例恢复
+请尽快认领处理(POST /api/human-tickets/TMW1FPHNH1/claim)。
+09:26:02 [sla] SLA超时:RESOLVE(优先级P1,已耗时1分钟,时限1分钟) ticketId=TMW1FPHNH1 priority=P1 age=1m notified=false
+```
+
+人工池（运营接口）已出现该单，`reason` 即超时口径：
+
+```bash
+curl.exe -s "http://localhost:8080/api/human-tickets?status=WAITING"
+```
+
+```json
+{
+    "total":  1,
+    "tasks":  [
+                  {
+                      "ticketId":  "TMW1FPHNH1",
+                      "reason":  "SLA超时:RESOLVE(优先级P1,已耗时1分钟,时限1分钟)",
+                      "detail":  "原始诉求:ECS 服务器 i-abc123 连不上了,请帮我重启实例恢复",
+                      "status":  "WAITING",
+                      "owner":  "",
+                      "createdAt":  "2026-11-04T01:26:02.893124Z",
+                      "updatedAt":  "2026-11-04T01:26:02.893124Z"
+                  }
+              ]
+}
+```
+
+指标接口同步反映（阶段 3 新增 `byPriority` 与 `sla`，SLA 达成率 = (总量 - 超时留痕) ÷ 总量）：
+
+```bash
+curl.exe -s http://localhost:8080/api/metrics/summary
+```
+
+```json
+{
+    "generatedAt":  "2026-11-04T01:26:19.690608500Z",
+    "totalTickets":  1,
+    "byStatus":  { "PENDING_APPROVAL":  1 },
+    "byPriority":  { "P1":  1 },
+    "closedTickets":  0,
+    "automatedClosedTickets":  0,
+    "automationRatePct":  0.0,
+    "humanEscalatedTickets":  1,
+    "escalationRatePct":  100.0,
+    "approvalTickets":  1,
+    "approvalRatePct":  100.0,
+    "sla":  { "breachedTickets":  1, "complianceRatePct":  0.0 }
+}
+```
+
+手工复核：1 单 P1 待审批未闭环，超 1 分钟解决时限 → SLA 达成率 (1-1)/1=0%；人工升级率 100%（被 SLA 拉进人工池）。此时仍可正常审批结单（升级只拉人不改状态）；人工池 `claim/resolve` 处理后工单转 CLOSED。
+
+路由：`triage 节点 → SlaPriorityRules 推导 priority 落 ticket.priority → SlaMonitor(@Scheduled) 扫未闭环+未留痕工单 → 双计时器判定 → breach(留痕 + 入池 + 审计 + 加急)`。
 
 ### offline 模式做了什么
 

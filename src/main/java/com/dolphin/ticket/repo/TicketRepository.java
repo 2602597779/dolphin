@@ -71,4 +71,16 @@ public interface TicketRepository extends JpaRepository<TicketEntity, String> {
 
     /** 结单时间落在 [from, to] 的工单(时间窗口内的 MTTR 口径) */
     List<TicketEntity> findByClosedAtBetween(Instant from, Instant to);
+
+    // ---- 阶段3:SLA 巡检与指标 ----
+
+    /** 未闭环且从未 SLA 超时留痕的工单(SlaMonitor 周期扫描的输入,幂等保证) */
+    List<TicketEntity> findByStatusNotAndSlaBreachAtIsNull(String status);
+
+    /** SLA 超时工单数(达成率分母 = 工单总量) */
+    long countBySlaBreachAtNotNull();
+
+    /** 优先级分布(未分级老数据按 P3 兜底):priority → 数量 */
+    @Query("select coalesce(t.priority, 'P3'), count(t) from TicketEntity t group by coalesce(t.priority, 'P3')")
+    List<Object[]> countGroupByPriority();
 }

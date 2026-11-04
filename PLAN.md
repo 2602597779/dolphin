@@ -63,14 +63,14 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 **业务目标**：P1~P4 优先级 + 响应/解决双计时器，超时自动升级人工池并加急通知。
 
 任务拆解：
-- [ ] T3.1 分诊节点输出优先级（triage 的意图分类附带 P1~P4：故障=P2、故障且"连不上/宕机"=P1、咨询=P4），落 `ticket.priority`
-- [ ] T3.2 `dolphin.sla` 配置：各级别响应/解决时限（如 P1 响应 5 分钟/解决 30 分钟）
-- [ ] T3.3 `SlaMonitor`（`@Scheduled` 每分钟扫一次）：未闭环且超响应时限 → 升级 `HumanTicketPool` + 标记 breach；超解决时限 → 加急（钉钉加急或审计 ALARM 留痕）
-- [ ] T3.4 指标 API 补充：SLA 达成率、各优先级分布
-- [ ] T3.5 单测：超时扫描逻辑（可注入时钟或缩短配置）
-- [ ] T3.6 README 剧本：P1 单故意不处理 → 观察超时升级；commit（msg: "阶段3:SLA优先级+超时自动升级人工池"）
+- [x] T3.1 分诊节点输出优先级——`SlaPriorityRules` 确定性规则推导（不依赖模型自觉）：故障+宕机信号（连不上/宕机/无法连接/不可用等）=P1、普通故障=P2、咨询=P4、其余及未分级=P3 兜底；triage 节点随分诊即时落 `ticket.priority`
+- [x] T3.2 `dolphin.sla` 配置——`SlaProperties`（response/resolve 双 Map）+ application.yml（P1 5m/30m ~ P4 240m/24h + scan-interval/scan-initial-delay 可调）
+- [x] T3.3 `SlaMonitor`（`@Scheduled` 巡检）：NEW/RUNNING 超响应时限或未 CLOSED 超解决时限 → 落 `sla_breach_at` 留痕 + 升级 `HumanTicketPool` + 审计 `sla-breach` + 钉钉加急（未配 webhook 自动降级日志）；留痕后跳过（幂等）、已认领不重置、不改工单状态不阻断审批续跑
+- [x] T3.4 指标 API 补充——`summary` 新增 `byPriority`（coalesce 兜底 P3）与 `sla`（达成率=(总量-超时留痕)÷总量）
+- [x] T3.5 单测——`SlaMonitorTest` 7 用例（@DataJpaTest+固定时钟+秒级时限：双计时器/超时升级/留痕幂等/认领不重置/CLOSED 免追责/null 兜底 P3）+ `SlaPriorityRulesTest` 5 用例（规则矩阵）+ `MetricsServiceTest` 扩展
+- [x] T3.6 README 剧本 5 已写入真实运行输出（P1 单 1 分钟不审批 → 巡检自动入池+加急+留痕，指标同步反映）；本会话独立复跑验证通过；commit（msg: "阶段3:SLA优先级+超时自动升级人工池"）
 
-**完成标准**：造一条 P1 工单，把时限配成 1 分钟，观察其被自动升级进人工池且有留痕。
+**完成标准**：造一条 P1 工单，把时限配成 1 分钟，观察其被自动升级进人工池且有留痕。✅ 已达成（2026-11-04 独立复验：提交 09:37:31 P1 待审批 → 09:38:40 被巡检 breach，人工池 WAITING + 审计 2 条 + 加急降级日志，后续多个扫描周期无重复；`mvn test` 181 用例 0 失败）
 
 ## 第二梯队（有余力再做，不影响主线）
 
@@ -88,10 +88,10 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 
 ## 当前断点（每次会话结束必须更新）
 
-**最后更新**：2026-11-03（第三次会话收尾）
-**已完成**：H0~H3；**阶段 1 全部完成**（已 commit）；**阶段 2 全部完成**（运营指标 API：MetricsService/Controller + closed_at/priority 落库 + 7 用例 + README 剧本 4，`mvn test` 169 用例 0 失败，代码在 `8557cc8`、README/PLAN 以阶段 2 msg 补交）
-**下一步**：阶段 3 SLA 优先级 + 超时升级，从 T3.1（分诊输出 P1~P4 落 `ticket.priority`）开始
-**git 状态**：阶段 2 的 README + PLAN.md 勾选以阶段 2 msg 入库后，工作区应保持干净
+**最后更新**：2026-11-04（第四次会话收尾）
+**已完成**：H0~H3；**阶段 1 全部完成**（已 commit）；**阶段 2 全部完成**（已 commit）；**阶段 3 全部完成**（SLA：SlaPriorityRules 确定性分级 + SlaMonitor 双计时器巡检 + sla_breach_at 留痕/幂等升级人工池/钉钉加急降级 + 指标 API byPriority/sla 字段 + 12 个新用例 + README 剧本 5 真实输出，`mvn test` 181 用例 0 失败）
+**下一步**：第一梯队（阶段 1~3）全部收口，可停手；若继续，从第二梯队**阶段 4 工单多轮对话**（`POST /api/tickets/{id}/reply`，业务真实感最大单点）开始
+**git 状态**：阶段 3 全部改动（sla 包 + ticket/metrics 接线 + application.yml + README + 本文件）以阶段 3 msg 入库后，工作区应保持干净
 
 ### 已提交的进度凭证（git log 摘要）
 
@@ -100,6 +100,7 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 - `阶段1:客户/租户模型+API-Key鉴权+工单归属隔离`（customer 包 + ApiKeyAuthFilter + Ticket 归属/列表 + TenantIsolationTest 9 用例 + README 双客户剧本）
 - `fix：dolohin`（阶段 2 全部代码：metrics 包 + TicketEntity closed_at/priority + 指标聚合查询 + MetricsServiceTest，由用户手动提交）
 - `阶段2:运营指标API(MTTR/自动化解决率/升级率/质检通过率)`（README 剧本 4 真实输出 + 本文件勾选）
+- `阶段3:SLA优先级+超时自动升级人工池`（sla 包 4 类 + triage 分级落库 + sla_breach_at 留痕 + 指标 API 扩展 + 12 用例 + README 剧本 5）
 
 ### 阶段 1 关键落点（面试话术/后续阶段引用）
 
@@ -113,6 +114,14 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 - 口径（README 剧本 4 与代码 javadoc 一致）：自动化结单率=CLOSED 且无人工池/审批 ÷ 总量；人工升级率=ESCALATED 或进过人工池 ÷ 总量；审批触发率=待审批或已有决策 ÷ 总量；质检通过率=PASS ÷ (PASS+REJECTED)（契约无效不计分母）；MTTR=结单戳-创建时间均值/中位数
 - `ticket.closed_at`：`updateStatus` 结单落戳、重开清空、重复结单保持首戳；`priority` 默认 P3（阶段 3 接入分诊产出）
 - `MetricsServiceTest`（@DataJpaTest）7 用例；端到端真实运行：5 单 → 80% 自动化/20% 审批/0% 升级/质检 5/5/MTTR 均值 7.5s 中位 0.1s，数字可手工复核
+
+### 阶段 3 关键落点（面试话术/后续阶段引用）
+
+- 分级：`SlaPriorityRules.derive(type, rawMessage)` 纯函数规则表——故障+宕机信号=P1 / 普通故障=P2 / 咨询=P4 / 其余=P3；triage 节点随分诊即时落 `ticket.priority`，可审计可复现，离线演示同样生效
+- 计时器：`dolphin.sla.response/resolve` 双 Map 配置，级别缺失取 P3 档兜底；响应=卡 NEW/RUNNING 未产出回复、解决=未 CLOSED（含待审批/转人工）
+- 巡检：`SlaMonitor.scan()` `@Scheduled`（周期/首延迟可配），输入=`findByStatusNotAndSlaBreachAtIsNull`；超时一次性动作：落 `sla_breach_at` → 未入池则入队 → 审计 `sla-breach` → 钉钉 markdown 加急（未配 webhook 降级日志）；设计要点：只拉人兜底不改工单状态，审批中断单仍可 approve 续跑结单
+- 指标：`summary` 新增 `byPriority`（JPQL `coalesce(priority,'P3')` 聚合）与 `sla{breachedTickets, complianceRatePct}`
+- 验证双保险：`SlaMonitorTest` 固定时钟秒级时限确定性断言（7 用例）+ 2026-11-04 真实复跑（P1 单 1 分钟不审批 → 巡检线程自动 breach 入池加急，多扫描周期无重复，日志/人工池/指标三处一致）
 
 ### 会话恢复指引（新会话照此操作）
 

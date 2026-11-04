@@ -28,7 +28,9 @@ import java.util.stream.Collectors;
  *   <li><b>质检通过率</b> = audit_log 中 quality-review PASS ÷ (PASS + REJECTED),
  *       契约无效(模型未按约定输出)不计入分母——属质检管线故障,不是质检结论;</li>
  *   <li><b>MTTR</b> = 结单工单 closed_at - created_at 的均值/中位数;
- *       重开(质检驳回)会清空结单时间,再次结单重新计时。</li>
+ *       重开(质检驳回)会清空结单时间,再次结单重新计时;</li>
+ *   <li><b>SLA 达成率</b> = (工单总量 - 超时留痕工单) ÷ 工单总量;
+ *       超时判定与留痕见 {@code SlaMonitor}(阶段3)。</li>
  * </ul>
  */
 @Service
@@ -47,10 +49,15 @@ public class MetricsService {
 
     /** 全量汇总指标 */
     public record Summary(String generatedAt, long totalTickets, Map<String, Long> byStatus,
+                          Map<String, Long> byPriority,
                           long closedTickets, long automatedClosedTickets, double automationRatePct,
                           long humanEscalatedTickets, double escalationRatePct,
                           long approvalTickets, double approvalRatePct,
-                          Quality quality, Mttr mttr) {
+                          Quality quality, Mttr mttr, Sla sla) {
+    }
+
+    /** SLA 达成情况:达成率 = (总量 - 超时留痕工单) ÷ 总量 */
+    public record Sla(long breachedTickets, double complianceRatePct) {
     }
 
     /** 质检指标:passRatePct 分母为 PASS + REJECTED(契约无效不计入) */
@@ -72,20 +79,24 @@ public class MetricsService {
     public record DailyCount(String date, long created, long closed) {
     }
 
-    /** 全量汇总:自动化结单率/人工升级率/审批触发率/质检通过率/MTTR */
+    /** 全量汇总:自动化结单率/人工升级率/审批触发率/质检通过率/MTTR/SLA 达成率/优先级分布 */
     public Summary summary() {
         long total = ticketRepository.count();
         Map<String, Long> byStatus = new TreeMap<>(ticketRepository.countGroupByStatus().stream()
+                .collect(Collectors.toMap(r -> (String) r[0], r -> (Long) r[1])));
+        Map<String, Long> byPriority = new TreeMap<>(ticketRepository.countGroupByPriority().stream()
                 .collect(Collectors.toMap(r -> (String) r[0], r -> (Long) r[1])));
         long closed = byStatus.getOrDefault(TicketService.STATUS_CLOSED, 0L);
         long automatedClosed = ticketRepository.countAutomatedClosed(TicketService.STATUS_CLOSED);
         long humanEscalated = ticketRepository.countHumanEscalated(TicketService.STATUS_ESCALATED);
         long approvalTouched = ticketRepository.countApprovalTouched(TicketService.STATUS_PENDING_APPROVAL);
-        return new Summary(Instant.now().toString(), total, byStatus,
+        long breached = ticketRepository.countBySlaBreachAtNotNull();
+        return new Summary(Instant.now().toString(), total, byStatus, byPriority,
                 closed, automatedClosed, pct(automatedClosed, total),
                 humanEscalated, pct(humanEscalated, total),
                 approvalTouched, pct(approvalTouched, total),
-                quality(), mttr(ticketRepository.findClosedWithTimestamp(TicketService.STATUS_CLOSED)));
+                quality(), mttr(ticketRepository.findClosedWithTimestamp(TicketService.STATUS_CLOSED)),
+                new Sla(breached, pct(total - breached, total)));
     }
 
     /** 时间窗口报表:from/to 为 ISO-8601;null 时 from 取 epoch、to 取当前时刻 */

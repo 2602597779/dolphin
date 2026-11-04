@@ -53,19 +53,23 @@ class MetricsServiceTest {
     @Test
     void summaryComputesEveryRateAndMttr() {
         // 数据布局(共 6 单,4 结单,2 全自动闭环):
-        // t1/t2:纯自动结单 | t3:走审批后结单 | t4:转人工后结单 | t5:待审批中 | t6:刚创建
+        // t1/t2:纯自动结单 | t3:走审批后结单 | t4:转人工后结单 | t5:待审批中 | t6:刚创建(P1)
         ticket("t1", TicketService.STATUS_CLOSED, T0, T0.plusSeconds(60));   // MTTR 60s
         ticket("t2", TicketService.STATUS_CLOSED, T0, T0.plusSeconds(120));  // MTTR 120s
         ticket("t3", TicketService.STATUS_CLOSED, T0, T0.plusSeconds(300));  // MTTR 300s,有审批
         ticket("t4", TicketService.STATUS_CLOSED, T0, T0.plusSeconds(600));  // MTTR 600s,进人工池
         ticket("t5", TicketService.STATUS_PENDING_APPROVAL, T0, null);
-        ticket("t6", TicketService.STATUS_NEW, T0, null);
+        ticket("t6", TicketService.STATUS_NEW, "P1", T0, null);
         approvalDecision("t3");
         humanTask("t4");
         qualityAudit("PASS opinion=ok");
         qualityAudit("PASS opinion=good");
         qualityAudit("REJECTED → 已重开人工复核 opinion=bad");
         qualityAudit("CONTRACT_INVALID(不重开,仅留痕) opinion=x");
+        // t1 SLA 超时留痕(其余未超)
+        TicketEntity t1 = ticketRepository.findById("t1").orElseThrow();
+        t1.setSlaBreachAt(T0.plusSeconds(30));
+        ticketRepository.save(t1);
 
         MetricsService.Summary s = service().summary();
 
@@ -74,6 +78,9 @@ class MetricsServiceTest {
                 .containsEntry("PENDING_APPROVAL", 1L)
                 .containsEntry("NEW", 1L);
         assertThat(s.closedTickets()).isEqualTo(4);
+
+        // 优先级分布:t1~t5 未传即默认 P3,t6 为 P1
+        assertThat(s.byPriority()).containsEntry("P3", 5L).containsEntry("P1", 1L);
 
         // 自动化闭环:仅 t1/t2(无人工池、无审批) → 2/6
         assertThat(s.automatedClosedTickets()).isEqualTo(2);
@@ -98,6 +105,10 @@ class MetricsServiceTest {
         assertThat(s.mttr().sampleSize()).isEqualTo(4);
         assertThat(s.mttr().meanSeconds()).isEqualTo(270.0);
         assertThat(s.mttr().medianSeconds()).isEqualTo(210.0);
+
+        // SLA 达成:仅 t1 超时留痕 → (6-1)/6 = 83.3%
+        assertThat(s.sla().breachedTickets()).isEqualTo(1);
+        assertThat(s.sla().complianceRatePct()).isEqualTo(83.3);
     }
 
     @Test
@@ -110,6 +121,9 @@ class MetricsServiceTest {
         assertThat(s.quality().passRatePct()).isZero();
         assertThat(s.mttr().sampleSize()).isZero();
         assertThat(s.mttr().meanSeconds()).isZero();
+        assertThat(s.byPriority()).isEmpty();
+        assertThat(s.sla().breachedTickets()).isZero();
+        assertThat(s.sla().complianceRatePct()).isZero();
     }
 
     @Test

@@ -52,6 +52,13 @@ public class TicketEntity {
     @Column(name = "closed_at")
     private Instant closedAt;
 
+    /**
+     * SLA 超时留痕时间(null=未超时):超响应/解决时限时由 {@code SlaMonitor} 落戳,
+     * 同时升级人工池并加急通知;已留痕的工单后续巡检跳过(幂等)。
+     */
+    @Column(name = "sla_breach_at")
+    private Instant slaBreachAt;
+
     protected TicketEntity() {
     }
 
@@ -108,6 +115,10 @@ public class TicketEntity {
         return closedAt;
     }
 
+    public Instant getSlaBreachAt() {
+        return slaBreachAt;
+    }
+
     public void setStatus(String status) {
         this.status = status;
     }
@@ -118,6 +129,10 @@ public class TicketEntity {
 
     public void setClosedAt(Instant closedAt) {
         this.closedAt = closedAt;
+    }
+
+    public void setSlaBreachAt(Instant slaBreachAt) {
+        this.slaBreachAt = slaBreachAt;
     }
 
     public void setUpdatedAt(Instant updatedAt) {

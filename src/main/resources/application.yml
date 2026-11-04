@@ -63,6 +63,25 @@ dolphin:
     # 缺省时启动随机生成临时密钥(进程重启后旧令牌全部失效,启动日志会 WARN)
     token-secret: ${DOLPHIN_APPROVAL_TOKEN_SECRET:}
 
+  # ---- SLA 优先级与超时升级(阶段3:P1~P4 双计时器,SlaMonitor 周期巡检)-----------
+  sla:
+    # 响应时限:卡在 NEW/RUNNING(尚未产出客户可见回复)超过时限 → 升级人工池+加急
+    response:
+      P1: 5m
+      P2: 30m
+      P3: 60m
+      P4: 240m
+    # 解决时限:未 CLOSED(含待审批/转人工)超过时限 → 升级人工池+加急
+    resolve:
+      P1: 30m
+      P2: 2h
+      P3: 8h
+      P4: 24h
+    # 巡检周期(演示/测试可配 10s 缩短观察窗口)
+    scan-interval: ${DOLPHIN_SLA_SCAN_INTERVAL:60s}
+    # 启动后首次巡检延迟(避开启动高峰)
+    scan-initial-delay: ${DOLPHIN_SLA_SCAN_INITIAL_DELAY:30s}
+
   # ---- 云服务数据源(可插拔:模拟器 / HTTP 真实云)----------------------------
   # 骨架期全部为 mock 值:provider=sim 时根本不读 cloud.* ;provider=http 时
   # base-url 默认指向本应用自己的 /__mock 端点,无外网即可跑通全链路。
