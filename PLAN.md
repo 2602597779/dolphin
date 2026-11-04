@@ -18,10 +18,10 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 
 ## 已知遗留硬伤（改造前顺手清理）
 
-- [x] H0. 删除 `src/main/java/com/dolphin/test/LeetcodeTest.java`（刷题代码混入主源码）
+- [x] H0. ~~删除 `src/main/java/com/dolphin/test/LeetcodeTest.java`~~ **已撤销（2026-11-04 用户要求保留，从 git 历史还原）。后续会话禁止删除此文件**
 - [x] H1. `.gitignore` 增加 `.trae/`
 - [x] H2. 当前 P0 持久化改造未提交 → commit 进版本库（commit msg: "P0:状态全落库+并发串扰根治+离线演示链路"）
-- [x] H3. LeetcodeTest 同包目录 `com/dolphin/test` 一并删除
+- [x] H3. ~~删除 `com/dolphin/test` 目录~~ **已撤销：同 H0，用户要求保留**
 
 ---
 
