@@ -2,6 +2,7 @@ package com.dolphin.ticket.repo;
 
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -76,6 +77,22 @@ public interface TicketRepository extends JpaRepository<TicketEntity, String> {
 
     /** 未闭环且从未 SLA 超时留痕的工单(SlaMonitor 周期扫描的输入,幂等保证) */
     List<TicketEntity> findByStatusNotAndSlaBreachAtIsNull(String status);
+
+    // ---- 阶段 O8:异步受理闸门 ----
+
+    /**
+     * 受理闸门:仅当工单当前状态等于 {@code from} 时才流转到 {@code to}(原子条件更新)。
+     * 返回受影响行数(0=状态已被并发请求或流程改变,受理失败)。
+     * 单条 UPDATE 的原子性天然跨实例成立:多节点部署时同一工单的并发受理也只有一个赢家,
+     * 取代进程内锁(O1 的 TicketLockRegistry)实现"同单串行、消息不穿插"。
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("update TicketEntity t set t.status = :to, t.updatedAt = :now"
+            + " where t.id = :id and t.status = :from")
+    int transitionStatusIf(@Param("id") String id,
+                           @Param("from") String from,
+                           @Param("to") String to,
+                           @Param("now") Instant now);
 
     /** SLA 超时工单数(达成率分母 = 工单总量) */
     long countBySlaBreachAtNotNull();

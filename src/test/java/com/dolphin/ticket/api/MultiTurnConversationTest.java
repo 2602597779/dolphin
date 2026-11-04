@@ -16,19 +16,17 @@ import org.springframework.test.context.ActiveProfiles;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * 阶段4 工单多轮对话回归:reply 续跑 + 对话线程全链路。
+ * 阶段4 工单多轮对话回归:reply 续跑 + 对话线程全链路(阶段 O8 起为异步受理语义)。
  *
  * <p>验证点:
  * <ol>
+ *   <li>受理即 202:submit/reply 立即返回 PROCESSING,图在后台线程池执行,
+ *       轮询等待终态后断言结论(与客户端轮询/SSE 的使用方式一致);</li>
  *   <li>多轮续跑:PENDING_APPROVAL 单追问后按最新上下文从头重跑(改口安全组 → 免审批直执结单);</li>
  *   <li>线程完整:客户/系统消息按序追加,每轮都入线程可回看;</li>
  *   <li>状态约束:CLOSED 拒绝追问(409)、ESCALATED 只记录不重跑、空消息 400;</li>
@@ -43,6 +41,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 })
 @ActiveProfiles("offline")
 class MultiTurnConversationTest {
+
+    /** 在途状态(图执行中/尚未受理完):轮询等待的"未完成"口径 */
+    private static final Set<String> IN_FLIGHT = Set.of(
+            TicketService.STATUS_NEW, TicketService.STATUS_RUNNING, TicketService.STATUS_PROCESSING);
 
     @Autowired
     private TicketController ticketController;
@@ -70,12 +72,12 @@ class MultiTurnConversationTest {
 
         // 第 2 轮:客户改口"其实是安全组没放行 443" → 按本轮诉求从头重跑
         // → authorizeSecurityGroup 免审批直执 → 结单(而非沿用上轮的重启审批断点)
-        Map<String, Object> body = body(ticketController.reply(id,
-                new TicketController.ReplyRequest("其实是安全组没放行443端口,帮我开一下"),
-                asCustomer("cust-001")));
-        assertThat(body.get("status")).isEqualTo(TicketService.STATUS_CLOSED);
-        assertThat(ticketService.get(id).orElseThrow().status()).isEqualTo(TicketService.STATUS_CLOSED);
-        assertThat((Integer) body.get("rounds")).isEqualTo(4); // 2 客户 + 2 系统
+        Map<String, Object> body = body(replyAndAwait(id, "cust-001",
+                new TicketController.ReplyRequest("其实是安全组没放行443端口,帮我开一下")));
+        assertThat(body.get("status")).isEqualTo(TicketService.STATUS_PROCESSING); // 202 受理体
+        assertThat(ticketService.get(id).orElseThrow().status())
+                .isEqualTo(TicketService.STATUS_CLOSED);
+        assertThat(conversationService.count(id)).isEqualTo(4); // 2 客户 + 2 系统
 
         // 线程按序完整:客户诉求/系统答复交替,第 2 轮答复对应本轮安全组诉求
         var messages = conversationService.messages(id);
@@ -158,8 +160,7 @@ class MultiTurnConversationTest {
                 .isEqualTo(TicketService.STATUS_PENDING_APPROVAL);
 
         // O3:追问会清旧断点,旧待审批动作作废必须留痕(含原动作,审批人旧链接失效可追溯)
-        ticketController.reply(id, new TicketController.ReplyRequest("再补充:重启之后仍然连不上"),
-                asCustomer("cust-001"));
+        replyAndAwait(id, "cust-001", new TicketController.ReplyRequest("再补充:重启之后仍然连不上"));
 
         List<AuditLogEntity> invalidated = auditLogRepository.findByAction("approval-invalidated")
                 .stream().filter(e -> id.equals(e.getSessionId())).toList();
@@ -174,11 +175,11 @@ class MultiTurnConversationTest {
         String requestId = "req-idem-1";
 
         // O7:首次追问按最新诉求改道安全组并结单
-        Map<String, Object> first = body(ticketController.reply(id,
-                new TicketController.ReplyRequest("其实是安全组没放行443端口,帮我开一下", requestId),
-                asCustomer("cust-001")));
-        assertThat(first.get("status")).isEqualTo(TicketService.STATUS_CLOSED);
-        int roundsAfterFirst = conversationService.messages(id).size();
+        Map<String, Object> first = body(replyAndAwait(id, "cust-001",
+                new TicketController.ReplyRequest("其实是安全组没放行443端口,帮我开一下", requestId)));
+        assertThat(first.get("status")).isEqualTo(TicketService.STATUS_PROCESSING); // 202 受理体
+        assertThat(ticketService.get(id).orElseThrow().status()).isEqualTo(TicketService.STATUS_CLOSED);
+        long roundsAfterFirst = conversationService.count(id);
         assertThat(roundsAfterFirst).isEqualTo(4);
 
         // 网络重试同一 requestId:返回 duplicated 标记,不重复落消息、不重复跑图
@@ -187,56 +188,51 @@ class MultiTurnConversationTest {
                 asCustomer("cust-001")));
         assertThat(retry).containsEntry("duplicated", true);
         assertThat(retry.get("status")).isEqualTo(TicketService.STATUS_CLOSED);
-        assertThat((Integer) retry.get("rounds")).isEqualTo(roundsAfterFirst);
-        assertThat(conversationService.messages(id)).hasSize(roundsAfterFirst);
-    }
-
-    @Test
-    void concurrentRepliesOnSameTicketAreSerialized() throws Exception {
-        String id = submit("cust-001", "我的ECS实例连不上了,ssh 都登不上");
-        int baseMessages = conversationService.messages(id).size();
-
-        // O1:两线程同时追问同一单,锁内串行执行;线程消息必须按整轮交替,不能出现半轮穿插
-        ExecutorService executor = Executors.newFixedThreadPool(2);
-        CountDownLatch start = new CountDownLatch(1);
-        List<Future<ResponseEntity<Map<String, Object>>>> futures = List.of(
-                executor.submit(() -> replyAfter(start, id, "补充:实例还是连不上", "concurrent-1")),
-                executor.submit(() -> replyAfter(start, id, "再补充:重启之后仍然连不上", "concurrent-2")));
-        start.countDown();
-
-        for (Future<ResponseEntity<Map<String, Object>>> future : futures) {
-            ResponseEntity<Map<String, Object>> response = future.get(15, TimeUnit.SECONDS);
-            assertThat(response.getStatusCode().value()).isEqualTo(200);
-            assertThat((String) response.getBody().get("status"))
-                    .isEqualTo(TicketService.STATUS_PENDING_APPROVAL);
-        }
-        executor.shutdown();
-
-        var messages = conversationService.messages(id);
-        assertThat(messages).hasSize(baseMessages + 4);
-        assertThat(messages).extracting(ConversationService.Message::role)
-                .containsExactly("USER", "AGENT", "USER", "AGENT", "USER", "AGENT");
-        String userContents = messages.stream()
-                .filter(m -> "USER".equals(m.role()))
-                .map(ConversationService.Message::content)
-                .reduce("", (a, b) -> a + "|" + b);
-        assertThat(userContents)
-                .contains("补充:实例还是连不上", "再补充:重启之后仍然连不上");
+        assertThat(retry.get("rounds")).isEqualTo(roundsAfterFirst);
+        assertThat(conversationService.count(id)).isEqualTo(roundsAfterFirst);
     }
 
     // ---- 辅助 ----
 
-    private ResponseEntity<Map<String, Object>> replyAfter(CountDownLatch start, String id,
-                                                           String message, String requestId) throws InterruptedException {
-        start.await();
-        return ticketController.reply(id, new TicketController.ReplyRequest(message, requestId),
-                asCustomer("cust-001"));
+    /** 提交并等待图执行完成,返回工单号;断言受理即 202 + PROCESSING */
+    private String submit(String customerId, String message) {
+        ResponseEntity<Map<String, Object>> response = ticketController.submit(
+                new TicketController.SubmitRequest(message), asCustomer(customerId));
+        assertThat(response.getStatusCode().value()).isEqualTo(202);
+        Map<String, Object> body = body(response);
+        assertThat(body.get("status")).isEqualTo(TicketService.STATUS_PROCESSING);
+        String id = (String) body.get("ticketId");
+        awaitRoundDone(id);
+        return id;
     }
 
-    private String submit(String customerId, String message) {
-        Map<String, Object> body = body(ticketController.submit(
-                new TicketController.SubmitRequest(message), asCustomer(customerId)));
-        return (String) body.get("ticketId");
+    /** 追问并等待本轮图执行完成,返回 202 受理体 */
+    private ResponseEntity<Map<String, Object>> replyAndAwait(String id, String customerId,
+                                                              TicketController.ReplyRequest request) {
+        ResponseEntity<Map<String, Object>> response = ticketController.reply(id, request,
+                asCustomer(customerId));
+        assertThat(response.getStatusCode().value()).isEqualTo(202);
+        awaitRoundDone(id);
+        return response;
+    }
+
+    /** 轮询等待工单离开在途状态(NEW/RUNNING/PROCESSING) */
+    private void awaitRoundDone(String ticketId) {
+        long deadline = System.nanoTime() + 20_000_000_000L;
+        String status = null;
+        while (System.nanoTime() < deadline) {
+            status = ticketService.get(ticketId).map(TicketService.Ticket::status).orElse(null);
+            if (status != null && !IN_FLIGHT.contains(status)) {
+                return;
+            }
+            try {
+                Thread.sleep(25);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(e);
+            }
+        }
+        throw new AssertionError("等待工单轮次完成超时 ticketId=" + ticketId + " lastStatus=" + status);
     }
 
     private MockHttpServletRequest asCustomer(String customerId) {

@@ -63,9 +63,17 @@ dolphin:
     # 缺省时启动随机生成临时密钥(进程重启后旧令牌全部失效,启动日志会 WARN)
     token-secret: ${DOLPHIN_APPROVAL_TOKEN_SECRET:}
 
+  # ---- 异步受理(阶段 O8:受理即 202,图执行移入独立线程池)--------------------
+  async:
+    # 图执行线程池大小(并发跑图的工单数上限);队列无界,受理必达
+    pool-size: ${DOLPHIN_ASYNC_POOL_SIZE:4}
+    # SSE 连接超时(0=不超时;终态时服务端主动 complete,断开由回调清理)
+    sse-timeout: ${DOLPHIN_ASYNC_SSE_TIMEOUT:0s}
+
   # ---- SLA 优先级与超时升级(阶段3:P1~P4 双计时器,SlaMonitor 周期巡检)-----------
   sla:
-    # 响应时限:卡在 NEW/RUNNING(尚未产出客户可见回复)超过时限 → 升级人工池+加急
+    # 响应时限:卡在 NEW/RUNNING/PROCESSING(尚未产出客户可见回复)超过时限 → 升级人工池+加急;
+    # PROCESSING 兜底 = 异步图执行卡死(线程丢失/云调用悬挂)时的超时补偿
     response:
       P1: 5m
       P2: 30m

@@ -5,6 +5,7 @@ import com.dolphin.ticket.repo.TicketRepository;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.List;
@@ -26,6 +27,11 @@ public class TicketService {
     /** 工单状态常量 */
     public static final String STATUS_NEW = "NEW";
     public static final String STATUS_RUNNING = "RUNNING";
+    /**
+     * 异步执行中(阶段 O8):受理闸门翻转后的状态——请求已受理(202),
+     * 图在后台线程池执行;本轮结束落到 CLOSED/PENDING_APPROVAL/ESCALATED。
+     */
+    public static final String STATUS_PROCESSING = "PROCESSING";
     public static final String STATUS_PENDING_APPROVAL = "PENDING_APPROVAL";
     public static final String STATUS_CLOSED = "CLOSED";
     public static final String STATUS_ESCALATED = "ESCALATED";
@@ -104,6 +110,18 @@ public class TicketService {
             e.setUpdatedAt(Instant.now());
             repository.save(e);
         });
+    }
+
+    /**
+     * 条件状态流转(阶段 O8 受理闸门):仅当工单当前状态等于 {@code expected} 时才落到 {@code target}。
+     *
+     * <p>返回 false 表示状态已被并发受理或流程改变,调用方应拒绝(409 语义)。
+     * 单条 UPDATE 的原子性即互斥语义:同一工单的并发受理只有一个赢家,
+     * 天然多实例安全——取代进程内锁(TicketLockRegistry,O1)的串行化职责。
+     */
+    @Transactional
+    public boolean tryTransition(String id, String expected, String target) {
+        return repository.transitionStatusIf(id, expected, target, Instant.now()) > 0;
     }
 
     /** 更新工单状态(工单不存在时静默忽略);结单落 closed_at 戳,重开清空(再次结单重新计时) */

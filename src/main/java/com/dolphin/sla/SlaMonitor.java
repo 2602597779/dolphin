@@ -82,7 +82,10 @@ public class SlaMonitor {
 
     /** 判定超时级别:null=未超时;RESPONSE=响应超时;RESOLVE=解决超时(响应未超先判响应) */
     private String breachLevel(String status, String priority, Duration age) {
-        if ((TicketService.STATUS_NEW.equals(status) || TicketService.STATUS_RUNNING.equals(status))
+        // NEW/RUNNING/PROCESSING 均视为"尚未产出客户可见回复":PROCESSING 是 O8 异步受理后的在途状态,
+        // 图卡死(线程丢失/云调用悬挂)时由响应计时器兜底升级人工,工单不会停在 PROCESSING 无人问津
+        if ((TicketService.STATUS_NEW.equals(status) || TicketService.STATUS_RUNNING.equals(status)
+                || TicketService.STATUS_PROCESSING.equals(status))
                 && age.compareTo(properties.responseOf(priority)) > 0) {
             return "RESPONSE";
         }

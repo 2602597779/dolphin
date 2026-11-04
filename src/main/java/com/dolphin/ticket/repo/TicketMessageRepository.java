@@ -13,4 +13,10 @@ public interface TicketMessageRepository extends JpaRepository<TicketMessageEnti
 
     /** 幂等判重:同一工单下是否已存在该客户端请求号(阶段4优化 O7) */
     Optional<TicketMessageEntity> findByTicketIdAndClientMsgId(String ticketId, String clientMsgId);
+
+    /** 本工单最新一条指定角色的消息(阶段 O8 状态视图取"最新客服答复",避免整线程加载) */
+    Optional<TicketMessageEntity> findFirstByTicketIdAndRoleOrderByIdDesc(String ticketId, String role);
+
+    /** 本工单消息数(阶段 O8 状态视图的 rounds 口径) */
+    long countByTicketId(String ticketId);
 }

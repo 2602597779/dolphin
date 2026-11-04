@@ -115,9 +115,20 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 - [x] O5 转录逐行截断：`ConversationService.tail` 按整行从尾部累加，单行超预算才截断并加 `…`；`ConversationServiceTest` 3 用例覆盖整行保留/单行截断/预算边界
 - [x] O6 检索带上文：`TicketGraphConfig.retrievalQuery` = 历史尾部 300 字 + 本轮原文，历史为空回退纯原文（`TicketGraphRetrievalQueryTest` 2 用例）
 - [x] O7 对话入口幂等：`ReplyRequest` 加可选 `requestId`；`ticket_message.client_msg_id` + `(ticket_id, client_msg_id)` 唯一约束；重复请求返回 `duplicated=true` 且不重复落消息（集成用例覆盖"首次结单后同号重试仍 200"）
-- [x] O8 异步跑图（只写面试口径，不改代码）：同步 invoke 占 HTTP 线程，演进方向为 202 + 轮询/SSE（状态机增加 PROCESSING、超时补偿、消息顺序保证）
+- [x] O8 异步跑图（原计划只写口径，后于阶段 4.2 实际落地，见下节）
 - [x] 收尾验证：`mvn test` 207 用例 0 失败（原 193 + 新增 14）；README 剧本 6 补阶段 4.1 加固说明；本文件勾选
 - [x] 收尾 commit：本地 commit（msg: `阶段4优化:并发保护+人工回复入线程+审批作废留痕+短事务补偿`，**仅本地，未推远程**）
+
+#### 阶段 4.2 O8 异步化落地（受理即 202 + 轮询/SSE）
+
+- [x] 图执行线程池：`TicketAsyncConfig`（`dolphin.async.pool-size` 可配，固定池，Bean 类型 ExecutorService 随容器 shutdown）+ `TicketAsyncProperties`
+- [x] 异步执行器：`TicketGraphRunner`——submit/reply/approve 三类轮次投递到池；图异常/收尾落库异常/线程池拒绝统一失败补偿（系统说明 + 转人工 + 审计），工单绝不留在 PROCESSING；收尾后发布 SSE 完成事件
+- [x] 受理闸门替代单机锁：`TicketService.tryTransition` 条件状态翻转（原子条件 UPDATE，多实例安全）——并发受理只有一个赢家，输家 409；O1 的 `TicketLockRegistry` 随之移除（同单串行语义由闸门保证，消息按整轮交替）
+- [x] Controller 受理即 202：submit/reply/approve 只做校验 + 闸门翻转 + 消息落库，响应含 poll/events 地址；队列满（仅进程关闭期）503 且已就地补偿转人工
+- [x] 轮询接口：`GET /{id}/status` + `TicketStatusService` 统一视图（status/processing/done/finalReply/pendingAction/rounds；PENDING_APPROVAL 算本轮已有结论）
+- [x] SSE：`GET /{id}/events` + `TicketEventPublisher`——连接即推 status 快照（晚连不丢信息），完成后推 result 事件并在终态结束连接；订阅生命周期回调摘除 + 显式摘除双保险
+- [x] PROCESSING 超时兜底：SLA 响应计时器口径覆盖 PROCESSING（卡死场景由巡检升级人工池，与 Runner 失败补偿互补）
+- [x] 验证：`mvn test` 225 用例 0 失败（原 207 + 新增 18：异步受理集成 6 + SSE 发布器 4 + 图执行器 8）；`AsyncTicketAcceptanceTest` 用闸门 Executor 把受理与图执行在时间上拉开，确定性验证 202/409 互斥/轮询口径/SSE 快照与 result 事件
 
 #### 阶段 4.1 关键落点（面试话术）
 
@@ -136,10 +147,10 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 
 ## 当前断点（每次会话结束必须更新）
 
-**最后更新**：2026-11-04（第六次会话：阶段 4.1 后续优化收尾）
-**已完成**：H0~H3；**阶段 1~3 全部完成**（均已 commit）；**阶段 4 全部完成**（commit `f63a28c`：ticket_message 表 + ConversationService 线程服务 + reply 接口"清 checkpoint 后按最新上下文从头重跑" + messages 线程查询 + 三 Agent 历史注入 + 离线桩本轮优先 + 12 个新用例 + README 剧本 6 真实输出）；**阶段 4.1 后续优化 O1~O7 全部完成**（并发串行化 `TicketLockRegistry`、人工完结答复入线程、审批作废审计 `approval-invalidated`、短事务 `TicketRoundService` + 失败补偿转人工 `reply-failed`、转录逐行截断、检索带上文、入口幂等 `requestId` + 唯一约束；`mvn test` 207 用例 0 失败 = 原 193 + 新增 14）
-**下一步**：可停手；若继续，从**阶段 5 钉钉卡片审批**（webhook 回调 resume）开始。O8 异步跑图本期只留面试口径（202 + 轮询/SSE、状态机增加 PROCESSING、超时补偿与同单消息顺序），未改代码
-**git 状态**：阶段 4.1 全部改动（`TicketLockRegistry`/`TicketRoundService` 两个新类 + Controller reply 改造 + ConversationService tail/requestId + 消息表 client_msg_id 唯一约束 + 检索带上文 + HumanTicketPool 回线程 + 3 个新测试类 + 4 个测试类补齐 + README 剧本 6 加固段 + 本文件）已以阶段 4.1 msg 本地 commit，**仅本地未推远程**；工作区干净
+**最后更新**：2026-11-04（第七次会话：阶段 4.2 O8 异步化落地）
+**已完成**：H0~H3；**阶段 1~3 全部完成**（均已 commit）；**阶段 4 全部完成**（commit `f63a28c`）；**阶段 4.1 O1~O7 全部完成**（commit `c945eb8`：并发串行化、人工完结答复入线程、审批作废审计、短事务 + 失败补偿、转录逐行截断、检索带上文、入口幂等）；**阶段 4.2 O8 异步化全部完成**（受理即 202 + 受理闸门 `tryTransition` 替代单机锁 + `TicketGraphRunner` 异步执行/失败补偿 + 轮询 `/status` + SSE `/events` + 异步质检接线；`mvn test` 225 用例 0 失败 = 原 207 + 新增 18）
+**下一步**：可停手；若继续，从**阶段 5 钉钉卡片审批**（webhook 回调 resume）开始
+**git 状态**：阶段 4.2 全部改动（`TicketAsyncConfig`/`TicketAsyncProperties`/`TicketGraphRunner`/`TicketStatusService`/`TicketEventPublisher` 五个新类 + `TicketLockRegistry` 删除 + Controller 受理即 202 改造 + SlaMonitor PROCESSING 口径 + TicketFlowHandler 消费终态意图 + 3 个新测试类 + 4 个测试类适配 + 本文件）待 commit，**仅本地未推远程**
 
 ### 已提交的进度凭证（git log 摘要）
 

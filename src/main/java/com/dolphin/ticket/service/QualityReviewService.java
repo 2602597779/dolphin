@@ -15,9 +15,10 @@ import java.util.concurrent.Executors;
 /**
  * 异步质检流水线:结单后审查终稿,不合格重开人工复核。
  *
- * <p>接线点在图的 followup 节点(结单动作完成后触发),独立单线程守护池异步执行——
- * 质检耗时/失败不影响结单主链路的响应;REJECT 时工单重开为 ESCALATED 交人工复核,
- * 契约无效(模型未按 VERDICT 行输出)只留痕不重开,质检解析故障不惩罚正常结单。
+ * <p>接线点在 {@link TicketGraphRunner}(阶段 O8:结单轮收尾事务提交后调度),
+ * 独立单线程守护池异步执行——质检耗时/失败不影响结单主链路;REJECT 时工单重开为
+ * ESCALATED 交人工复核,契约无效(模型未按 VERDICT 行输出)只留痕不重开,
+ * 质检解析故障不惩罚正常结单。
  */
 @Component
 public class QualityReviewService {

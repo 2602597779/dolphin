@@ -61,6 +61,13 @@ public final class TicketState {
     /** 最终结单回复(文本) */
     public static final String FINAL_REPLY = "finalReply";
 
+    /**
+     * 本轮终态(阶段 O8):结单/转人工节点不再直接落库工单状态,而是把意图写进图状态
+     * (CLOSED/ESCALATED),由异步执行器在收尾事务里与终稿一起原子落库——
+     * 保证"轮询看到 done=true"与"终稿已入线程"同时成立,消除中间态竞态。
+     */
+    public static final String FINAL_STATUS = "finalStatus";
+
     private TicketState() {
     }
 
@@ -71,7 +78,7 @@ public final class TicketState {
         Map<String, KeyStrategy> strategies = new HashMap<>();
         for (String key : List.of(TICKET_ID, RAW_MESSAGE, CONVERSATION_HISTORY, CLASSIFICATION,
                 DIAGNOSIS_REPORT, SIMILAR_TICKETS, REPLY_DRAFT, PENDING_ACTION, PROPOSAL_INVALID,
-                APPROVED, EXECUTE_RESULT, EXECUTE_STATUS, FINAL_REPLY)) {
+                APPROVED, EXECUTE_RESULT, EXECUTE_STATUS, FINAL_REPLY, FINAL_STATUS)) {
             strategies.put(key, new ReplaceStrategy());
         }
         return strategies;

@@ -77,7 +77,6 @@ public class TicketGraphConfig {
                                        ActionRegistry actionRegistry,
                                        ActionExecutor actionExecutor,
                                        DocIngestService docIngestService,
-                                       com.dolphin.ticket.service.QualityReviewService qualityReviewService,
                                        com.dolphin.ticket.service.HumanTicketPool humanTicketPool) throws GraphStateException {
 
         // 状态工厂:注册所有共享 key 的合并策略;序列化器改用 Jackson(默认 Gson 不在 classpath)
@@ -180,13 +179,14 @@ public class TicketGraphConfig {
                     execResult == null ? ActionExecutor.Status.SUCCESS.name() : execResult.status().name());
         }));
 
-        // ---- 结单:汇总最终回复并更新工单状态 ----
+        // ---- 结单:汇总最终回复;终态意图写图状态,由异步执行器与终稿原子落库 ----
         graph.addNode(NODE_FOLLOWUP, node_async(state -> {
             String ticketId = TicketState.str(state, TicketState.TICKET_ID, "");
             String draft = TicketState.str(state, TicketState.REPLY_DRAFT, "");
             String executeResult = TicketState.str(state, TicketState.EXECUTE_RESULT, "");
             String finalReply = executeResult.isBlank() ? draft : draft + "\n\n处理结果:" + executeResult;
-            ticketService.updateStatus(ticketId, TicketService.STATUS_CLOSED);
+            // O8:状态不再此处置 CLOSED——先落状态会让轮询端看到 done=true 却读不到终稿;
+            // 终态意图经 FINAL_STATUS 传递,由 TicketGraphRunner 在收尾事务中与终稿一起原子提交
             approvalService.clear(ticketId);
             // 诊断回流:结单结论写入向量库,后续相似工单/告警可语义检索到本次处理经验
             // (Embedding 不可用时仅告警,不影响结单主流程)
@@ -195,9 +195,11 @@ public class TicketGraphConfig {
             } catch (Exception e) {
                 log.warn("[graph] 结单结论回流向量库失败 ticketId={}: {}", ticketId, e.getMessage());
             }
-            // 异步质检:结单后审查终稿,不合格重开人工复核(独立线程池,不阻塞结单主链路)
-            qualityReviewService.reviewAsync(ticketId, finalReply);
-            return Map.of(TicketState.FINAL_REPLY, finalReply);
+            // 异步质检由执行器在收尾事务提交后调度(先调度会有 REJECT 重开的 ESCALATED
+            // 被收尾 CLOSED 覆盖的竞态)
+            return Map.of(
+                    TicketState.FINAL_REPLY, finalReply,
+                    TicketState.FINAL_STATUS, TicketService.STATUS_CLOSED);
         }));
 
         // ---- 转人工:高危/超范围工单直接升级;写操作验证失败/被拒时携带执行详情升级 ----

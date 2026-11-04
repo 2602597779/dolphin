@@ -10,13 +10,16 @@ import org.springframework.transaction.annotation.Transactional;
  * 图执行异常时会出现"客户消息已落库、线程没有答复、状态仍停在 RUNNING"的脏中间态。
  * 这里把每轮的首尾两次多表写入收敛为短事务:
  * <ul>
- *   <li>{@link #beginRound}:取历史 + 落客户消息 + 置 RUNNING,同一事务;</li>
+ *   <li>{@link #beginRound}:取历史 + 落客户消息,同一事务;</li>
  *   <li>{@link #completeRound}:落系统回复 + 按需写状态,同一事务。</li>
  * </ul>
  *
- * <p><b>关键边界</b>:{@code graph.invoke} 内含云 API 调用与指数退避轮询,耗时可达秒级,
- * 绝不能包进事务(会长时间占用数据库连接)。因此图执行始终在事务之外,只把"消息 + 状态"
- * 的短写收敛,异常分支再走补偿写入。
+ * <p><b>关键边界</b>:图执行(含云 API 调用与指数退避轮询,耗时可达秒级)绝不包进事务。
+ * 阶段 O8 起图执行移入独立线程池({@link TicketGraphRunner}),本服务只保留事务边界。
+ *
+ * <p><b>状态翻转归属</b>(阶段 O8):beginRound 不再写状态——受理闸门
+ * ({@link TicketService#tryTransition} 条件更新)由受理链路在调用本方法前完成,
+ * 保证"读状态 → 校验 → 翻转 → 落消息"的互斥语义集中在闸门一处。
  */
 @Component
 public class TicketRoundService {
@@ -30,7 +33,8 @@ public class TicketRoundService {
     }
 
     /**
-     * 开启一轮追问:先取历史(不含本轮),再落客户消息并置 RUNNING,同一事务提交。
+     * 开启一轮追问:先取历史(不含本轮),再落客户消息,同一事务提交。
+     * (状态已由受理链路先行翻转为 PROCESSING,此处不重复写。)
      *
      * @return 本轮之前的对话历史转录,供注入图状态 CONVERSATION_HISTORY
      */
@@ -38,7 +42,6 @@ public class TicketRoundService {
     public String beginRound(String ticketId, String message, String requestId) {
         String history = conversationService.transcript(ticketId);
         conversationService.appendUser(ticketId, message, requestId);
-        ticketService.updateStatus(ticketId, TicketService.STATUS_RUNNING);
         return history;
     }
 

@@ -240,20 +240,57 @@ public class LeetcodeTest {
      *   "pwwkew" → 3（"wke"，注意 "pwke" 是子序列不是子串）
      */
     public static int lengthOfLongestSubstring(String s) {
-        // key: 字符, value: 该字符最近出现的下标
+        // HashMap 记录每个字符最近一次出现的下标
+        // 例如处理到 "abca" 的第二个 a 时，Map 中 a→0（a 第一次出现在下标0）
         Map<Character, Integer> charIndex = new HashMap<>();
-        int left = 0;        // 滑动窗口左边界
-        int maxLen = 0;      // 最长无重复子串长度
 
+        // left：滑动窗口的左边界，始终指向"当前无重复子串"的起点
+        // 初始时窗口左边界在第 0 位
+        int left = 0;
+
+        // maxLen：记录遍历过程中出现过的最长无重复子串长度
+        int maxLen = 0;
+
+        // right：滑动窗口的右边界，也是当前正在处理的字符下标
+        // 外层 for 循环本质就是 right 从 0 一直走到 s.length()-1，每个位置处理一次
         for (int right = 0; right < s.length(); right++) {
+
+            // 取出当前 right 指向的字符
             char c = s.charAt(right);
-            // 若字符 c 最近一次出现在窗口内（下标 >= left），左边界跳到重复字符的下一位
+
+            /*
+             * 核心判断：字符 c 之前是否出现过，且上次出现的位置还在当前窗口内？
+             *
+             * 条件1: charIndex.containsKey(c)
+             *   → c 之前出现过（Map 里有它的记录）
+             *
+             * 条件2: charIndex.get(c) >= left
+             *   → c 上次出现的下标 >= 当前窗口左边界 left
+             *   说明那个重复字符"还躺在窗口里面"，必须把窗口左边界移过去
+             *
+             * 举个具体例子：s = "abcabcbb"
+             *   处理到下标3的 'a' 时：
+             *     Map 中 a→0，left=0
+             *     a 出现过 ✓，下标0 >= left(0) ✓
+             *     → left = 0 + 1 = 1
+             *     窗口从 [0,3] 变为 [1,3]，即 "bca"（去掉了重复的 a）
+             *
+             * 反例：如果上次出现的下标 < left，说明那个重复字符已经"被踢出窗口了"，
+             *       不影响当前窗口的无重复性，不需要移动 left
+             */
             if (charIndex.containsKey(c) && charIndex.get(c) >= left) {
+                // 左边界跳到"上次出现的 c"的下一位
+                // 为什么是 +1？因为那个旧 c 占了位置，从它的下一个才开始算新的无重复审区
                 left = charIndex.get(c) + 1;
             }
-            // 更新字符 c 的最近出现位置
+
+            // 把 c 的最新下标写入 Map（覆盖旧值）
+            // 这样下次遇到 c 时，Map 里存的就是"最近一次"出现的位置
             charIndex.put(c, right);
-            // 更新最大长度
+
+            // 此时 [left, right] 是一个合法的无重复窗口
+            // 窗口长度 = right - left + 1
+            // 不断更新全局最大值
             maxLen = Math.max(maxLen, right - left + 1);
         }
 

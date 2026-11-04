@@ -10,6 +10,7 @@ import com.dolphin.ticket.infra.audit.AuditLogger;
 import com.dolphin.ticket.orchestration.TicketGraphCompiler;
 import com.dolphin.ticket.orchestration.state.TicketState;
 import com.dolphin.ticket.service.ApprovalService;
+import com.dolphin.ticket.service.QualityReviewService;
 import com.dolphin.ticket.service.TicketService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,15 +42,18 @@ public class TicketFlowHandler implements CapabilityHandler {
     private final TicketService ticketService;
     private final ApprovalService approvalService;
     private final AuditLogger auditLogger;
+    private final QualityReviewService qualityReviewService;
 
     public TicketFlowHandler(TicketGraphCompiler compiler,
                              TicketService ticketService,
                              ApprovalService approvalService,
-                             AuditLogger auditLogger) {
+                             AuditLogger auditLogger,
+                             QualityReviewService qualityReviewService) {
         this.compiler = compiler;
         this.ticketService = ticketService;
         this.approvalService = approvalService;
         this.auditLogger = auditLogger;
+        this.qualityReviewService = qualityReviewService;
     }
 
     @Override
@@ -126,13 +130,22 @@ public class TicketFlowHandler implements CapabilityHandler {
     }
 
     /**
-     * 解读图执行结果:有终稿→清除流程状态返回终稿;停在审批前→记录 pendingTicketId 并提示;
+     * 解读图执行结果:有终稿→消费终态意图(FINAL_STATUS,阶段 O8 起结单节点不再直接落库)后
+     * 清除流程状态返回终稿;停在审批前→记录 pendingTicketId 并提示;
      * 其余(异常中断)→回退状态。
      */
     private String interpretState(String ticketId, OverAllState state, DialogContext ctx, String errorHint) {
         String finalReply = state == null ? null : TicketState.str(state, TicketState.FINAL_REPLY, null);
         String pendingAction = state == null ? "" : TicketState.str(state, TicketState.PENDING_ACTION, "");
         if (finalReply != null && !finalReply.isBlank()) {
+            // 终态意图落库(结单轮=CLOSED;转人工轮节点已自行落 ESCALATED,此处为空跳过)
+            String finalStatus = state == null ? null : TicketState.str(state, TicketState.FINAL_STATUS, null);
+            if (finalStatus != null && !finalStatus.isBlank()) {
+                ticketService.updateStatus(ticketId, finalStatus);
+                if (TicketService.STATUS_CLOSED.equals(finalStatus)) {
+                    qualityReviewService.reviewAsync(ticketId, finalReply);
+                }
+            }
             clearFlow(ctx);
             return finalReply;
         }

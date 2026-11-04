@@ -100,6 +100,20 @@ class SlaMonitorTest {
     }
 
     @Test
+    void processingTicketPastResponseLimitBreachesResponse() {
+        // 阶段 O8 超时补偿兜底:受理即 202 后图卡死(线程丢失/云调用悬挂)卡在 PROCESSING,
+        // 响应计时器把 PROCESSING 计入"未响应"口径(P1 响应时限 30s)→ RESPONSE 超时升级人工
+        ticket("t2b", TicketService.STATUS_PROCESSING, "P1", NOW.minus(Duration.ofMinutes(5)));
+
+        monitor.scan();
+
+        assertThat(ticketRepository.findById("t2b").orElseThrow().getSlaBreachAt()).isEqualTo(NOW);
+        assertThat(pool.get("t2b")).isPresent();
+        assertThat(pool.get("t2b").orElseThrow().reason()).contains("SLA超时:RESPONSE");
+        assertThat(auditRows("sla-breach")).hasSize(1);
+    }
+
+    @Test
     void ticketWithinLimitsIsUntouched() {
         // P2 待审批,创建 1 分钟(时限 30 分钟)→ 未超时
         ticket("t3", TicketService.STATUS_PENDING_APPROVAL, "P2", NOW.minus(Duration.ofMinutes(1)));

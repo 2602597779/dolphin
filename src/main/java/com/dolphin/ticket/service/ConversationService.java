@@ -72,6 +72,18 @@ public class ConversationService {
                 && repository.findByTicketIdAndClientMsgId(ticketId, requestId).isPresent();
     }
 
+    /** 本工单最新一条系统回复(阶段 O8 状态视图的 finalReply 口径:终稿/草稿/人工完结答复);无则 null */
+    public String latestAgentReply(String ticketId) {
+        return repository.findFirstByTicketIdAndRoleOrderByIdDesc(ticketId, TicketMessageEntity.ROLE_AGENT)
+                .map(TicketMessageEntity::getContent)
+                .orElse(null);
+    }
+
+    /** 本工单消息数(状态视图的 rounds 口径,不加载整线程) */
+    public long count(String ticketId) {
+        return repository.countByTicketId(ticketId);
+    }
+
     /**
      * 历史转录文本(喂给 Agent 的上下文):"客户: …" / "客服: …" 逐行拼接。
      * 无历史返回空串(首轮);超长时按行从尾部保留,不切断半行。
