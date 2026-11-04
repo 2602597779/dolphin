@@ -150,7 +150,7 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 **最后更新**：2026-11-04（第七次会话：阶段 4.2 O8 异步化落地）
 **已完成**：H0~H3；**阶段 1~3 全部完成**（均已 commit）；**阶段 4 全部完成**（commit `f63a28c`）；**阶段 4.1 O1~O7 全部完成**（commit `c945eb8`：并发串行化、人工完结答复入线程、审批作废审计、短事务 + 失败补偿、转录逐行截断、检索带上文、入口幂等）；**阶段 4.2 O8 异步化全部完成**（受理即 202 + 受理闸门 `tryTransition` 替代单机锁 + `TicketGraphRunner` 异步执行/失败补偿 + 轮询 `/status` + SSE `/events` + 异步质检接线；`mvn test` 225 用例 0 失败 = 原 207 + 新增 18）
 **下一步**：可停手；若继续，从**阶段 5 钉钉卡片审批**（webhook 回调 resume）开始
-**git 状态**：阶段 4.2 全部改动（`TicketAsyncConfig`/`TicketAsyncProperties`/`TicketGraphRunner`/`TicketStatusService`/`TicketEventPublisher` 五个新类 + `TicketLockRegistry` 删除 + Controller 受理即 202 改造 + SlaMonitor PROCESSING 口径 + TicketFlowHandler 消费终态意图 + 3 个新测试类 + 4 个测试类适配 + 本文件）待 commit，**仅本地未推远程**
+**git 状态**：阶段 4.2 全部改动（`TicketAsyncConfig`/`TicketAsyncProperties`/`TicketGraphRunner`/`TicketStatusService`/`TicketEventPublisher` 五个新类 + `TicketLockRegistry` 删除 + Controller 受理即 202 改造 + SlaMonitor PROCESSING 口径 + TicketFlowHandler 消费终态意图 + 3 个新测试类 + 4 个测试类适配 + 本文件）已本地 commit `b2e9e7f`（**仅本地未推远程**）；工作区干净
 
 ### 已提交的进度凭证（git log 摘要）
 
