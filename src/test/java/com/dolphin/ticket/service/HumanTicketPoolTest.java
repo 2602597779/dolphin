@@ -2,12 +2,15 @@ package com.dolphin.ticket.service;
 
 import com.dolphin.ticket.infra.audit.AuditLogger;
 import com.dolphin.ticket.repo.HumanTaskRepository;
+import com.dolphin.ticket.repo.TicketMessageEntity;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.context.annotation.Import;
 
 import java.util.Optional;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -20,16 +23,20 @@ import static org.mockito.Mockito.verify;
  * P0 起任务落库(真实 H2 内存库),同工单重复落队整行覆盖语义由主键 upsert 保证。
  */
 @DataJpaTest
+@Import(ConversationService.class)
 class HumanTicketPoolTest {
 
     @Autowired
     private HumanTaskRepository repository;
 
+    @Autowired
+    private ConversationService conversationService;
+
     private final AuditLogger auditLogger = mock(AuditLogger.class);
     private final TicketService ticketService = mock(TicketService.class);
 
     private HumanTicketPool pool() {
-        return new HumanTicketPool(repository, auditLogger, ticketService);
+        return new HumanTicketPool(repository, auditLogger, ticketService, conversationService);
     }
 
     @Test
@@ -79,6 +86,36 @@ class HumanTicketPoolTest {
         assertEquals(HumanTicketPool.STATUS_RESOLVED, resolved.get().status());
         // 完结联动工单状态转 CLOSED
         verify(ticketService).updateStatus("T1", TicketService.STATUS_CLOSED);
+    }
+
+    @Test
+    void resolveAppendsHumanAnswerToThread() {
+        HumanTicketPool pool = pool();
+        pool.add("T1", "原因", "详情");
+        pool.claim("T1", "专员A");
+        pool.resolve("T1", "已人工处理恢复");
+
+        // O2:人工完结把专员答复补进客户线程,线程闭环可回看
+        var messages = conversationService.messages("T1");
+        assertThat(messages).hasSize(1);
+        assertThat(messages.get(0).role()).isEqualTo(TicketMessageEntity.ROLE_AGENT);
+        assertThat(messages.get(0).content()).isEqualTo("人工处理完成: 已人工处理恢复");
+    }
+
+    @Test
+    void resolveWithBlankNoteUsesDefaultAnswerAndDoesNotDuplicate() {
+        HumanTicketPool pool = pool();
+        pool.add("T1", "原因", "详情");
+        pool.claim("T1", "专员A");
+        pool.resolve("T1", " ");
+
+        assertThat(conversationService.messages("T1"))
+                .extracting(ConversationService.Message::content)
+                .containsExactly("人工处理完成,工单已结单");
+
+        // 重复 resolve 被状态过滤拦截,不重复落消息
+        assertTrue(pool.resolve("T1", "again").isEmpty());
+        assertThat(conversationService.messages("T1")).hasSize(1);
     }
 
     @Test

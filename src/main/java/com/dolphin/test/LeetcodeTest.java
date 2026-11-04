@@ -44,6 +44,11 @@ public class LeetcodeTest {
 
         int[] nums7 = {0, 0, 0};
         System.out.println(threeSum(nums7)); // [[0,0,0]]
+
+        // 测试无重复字符的最长子串
+        System.out.println(lengthOfLongestSubstring("abcabcbb")); // 3
+        System.out.println(lengthOfLongestSubstring("bbbbb")); // 1
+        System.out.println(lengthOfLongestSubstring("pwwkew")); // 3
     }
 
     /**
@@ -213,6 +218,46 @@ public class LeetcodeTest {
             }
         }
         return result;
+    }
+
+    /**
+     * 无重复字符的最长子串（LeetCode 3）
+     * 给定一个字符串 s，找出其中不含有重复字符的最长子串的长度。
+     *
+     * 算法思路：滑动窗口（双指针）+ HashMap记录字符最近出现位置
+     * - left 为窗口左边界，right 为窗口右边界（即当前遍历到的字符）
+     * - Map 中存储每个字符最近一次出现的下标
+     * - 当 right 指向的字符已经在窗口内出现过（Map 中记录的下标 >= left），
+     *   将 left 直接跳到重复字符的下一位，而不是逐个移动（这是关键优化）
+     * - 每步更新答案：当前窗口长度 = right - left + 1
+     *
+     * 时间复杂度：O(n)，left 和 right 各只向右移动，总共 O(n)
+     * 空间复杂度：O(min(n, |字符集|))，HashMap 最多存储窗口内的字符
+     *
+     * 示例：
+     *   "abcabcbb" → 3（"abc"）
+     *   "bbbbb" → 1（"b"）
+     *   "pwwkew" → 3（"wke"，注意 "pwke" 是子序列不是子串）
+     */
+    public static int lengthOfLongestSubstring(String s) {
+        // key: 字符, value: 该字符最近出现的下标
+        Map<Character, Integer> charIndex = new HashMap<>();
+        int left = 0;        // 滑动窗口左边界
+        int maxLen = 0;      // 最长无重复子串长度
+
+        for (int right = 0; right < s.length(); right++) {
+            char c = s.charAt(right);
+            // 若字符 c 最近一次出现在窗口内（下标 >= left），左边界跳到重复字符的下一位
+            if (charIndex.containsKey(c) && charIndex.get(c) >= left) {
+                left = charIndex.get(c) + 1;
+            }
+            // 更新字符 c 的最近出现位置
+            charIndex.put(c, right);
+            // 更新最大长度
+            maxLen = Math.max(maxLen, right - left + 1);
+        }
+
+        return maxLen;
     }
 
 }

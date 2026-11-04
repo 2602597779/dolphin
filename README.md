@@ -393,6 +393,17 @@ curl.exe -s --noproxy "*" http://localhost:8080/api/tickets/TMW1IC0QD1/messages 
 
 路由：`reply 接口(归属校验/CLOSED 409/ESCALATED 只记录) → 清旧 checkpoint → 对话历史注入 CONVERSATION_HISTORY → 图从头重跑 → 终稿/草稿落线程`。
 
+阶段 4.1 加固（与剧本 6 同一链路，`mvn test` 207 用例全绿）：
+
+- **并发串行化（O1）**：reply 按 ticketId 加锁，把「读状态 → 判重 → 清断点 → invoke → 落库收尾」整段串行化；`TicketLockRegistry` 带引用计数，用完即从 map 移除，不随工单号堆积。边界：单机锁只在单进程有效，多实例部署需 `ticket.version` 乐观锁或 Redis 分布式锁。
+- **入口幂等（O7）**：`reply` 请求体支持可选 `requestId`（如 `{"message":"...","requestId":"req-001"}`）；同一工单重复提交同号返回 `{"duplicated":true,...}`，不重复落消息、不重复跑图；`ticket_message(ticket_id, client_msg_id)` 唯一约束做多实例兜底。
+- **审批作废留痕（O3）**：`PENDING_APPROVAL` 单被追问时，先读旧 `PENDING_ACTION` 并写审计 `approval-invalidated`，再清断点重跑；审批人手里的旧链接失效可追溯。
+- **短事务 + 失败补偿（O4）**：`TicketRoundService.beginRound/completeRound` 把「消息 + 状态」收敛为短事务；`graph.invoke` 始终在事务外（云调用 + 退避轮询不占 DB 连接）。图异常时补系统说明 + 转人工 + `reply-failed` 审计，客户消息保留作证据，不再出现"有追问、无答复"。
+- **转录按行截断（O5）**：6000 字符预算按整行从尾部累加，不再切半行；仅单行超预算时截断该行并加 `…`。
+- **检索带上文（O6）**：诊断/问答检索 query = 历史尾部 300 字 + 本轮原文，模糊追问（"那怎么办"）仍能召回此前的实例、端口、错误码。
+- **人工完结回线程（O2）**：`HumanTicketPool.resolve` 把专员答复（或默认结单说明）补成线程末条 AGENT 消息，客户侧线程闭环。
+- **异步演进口径（O8，本期未实现）**：当前 submit/reply 同步 `graph.invoke` 占用 HTTP 线程；演进方向是受理即返回 `202` + 轮询/SSE 推送，状态机增加 `PROCESSING`，并需处理超时补偿与同单消息顺序（O1 的单机锁届时改为按工单的消息队列/分布式锁）。
+
 ### offline 模式做了什么
 
 - **ChatModel 桩**（`com.dolphin.ticket.offline.ScriptedChatModel`，`@Profile("offline") + @Primary`）：在最底层替换模型输出，按系统提示词特征识别分诊/诊断/问答/回复四类 Agent 调用并返回脚本化文本；真实的 ChatClient 流式 API、graph 编排、审批中断/resume、动作执行器管线全部原样走通。

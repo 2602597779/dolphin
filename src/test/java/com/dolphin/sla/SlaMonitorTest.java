@@ -8,6 +8,7 @@ import com.dolphin.ticket.infra.audit.AuditLogger;
 import com.dolphin.ticket.repo.HumanTaskRepository;
 import com.dolphin.ticket.repo.TicketEntity;
 import com.dolphin.ticket.repo.TicketRepository;
+import com.dolphin.ticket.service.ConversationService;
 import com.dolphin.ticket.service.HumanTicketPool;
 import com.dolphin.ticket.service.TicketService;
 import org.junit.jupiter.api.BeforeEach;
@@ -59,7 +60,8 @@ class SlaMonitorTest {
         notifier = mock(DingTalkNotifier.class);
         when(notifier.sendMarkdown(startsWith("[SLA加急]"), contains("P1"))).thenReturn(true);
         AuditLogger auditLogger = new AuditLogger(new CloudApiProperties(), auditLogRepository);
-        pool = new HumanTicketPool(humanTaskRepository, auditLogger, new TicketService(ticketRepository));
+        pool = new HumanTicketPool(humanTaskRepository, auditLogger, new TicketService(ticketRepository),
+                mock(ConversationService.class));
         // 秒级时限,固定时钟推进判定,无需真实等待
         SlaProperties properties = new SlaProperties();
         properties.setResponse(Map.of("P1", Duration.ofSeconds(30), "P2", Duration.ofMinutes(30),

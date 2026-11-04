@@ -7,6 +7,7 @@ import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Index;
 import jakarta.persistence.Table;
+import jakarta.persistence.UniqueConstraint;
 
 import java.time.Instant;
 
@@ -16,9 +17,15 @@ import java.time.Instant;
  * <p>一条工单一个对话线程:提交时的原始诉求是首条用户消息,此后每轮
  * 客户补充({@code POST /api/tickets/{id}/reply})与系统回复依次追加,
  * 支撑"PENDING 单基于上下文续跑"与客户侧线程回看。
+ *
+ * <p>(ticket_id, client_msg_id) 唯一约束是入口幂等的数据库兜底:同一请求号
+ * 在一张工单下只允许落一条客户消息,单进程内由 reply 锁保证,多实例由该约束兜底。
  */
 @Entity
-@Table(name = "ticket_message", indexes = @Index(name = "idx_message_ticket", columnList = "ticket_id"))
+@Table(name = "ticket_message",
+        indexes = @Index(name = "idx_message_ticket", columnList = "ticket_id"),
+        uniqueConstraints = @UniqueConstraint(name = "uk_message_ticket_client_msg",
+                columnNames = {"ticket_id", "client_msg_id"}))
 public class TicketMessageEntity {
 
     /** 角色:客户发言 */
@@ -42,6 +49,10 @@ public class TicketMessageEntity {
     @Column(name = "content", nullable = false, length = 8192)
     private String content;
 
+    /** 客户端请求号(reply 幂等键;仅客户消息携带,系统回复为 null) */
+    @Column(name = "client_msg_id", length = 64)
+    private String clientMsgId;
+
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;
 
@@ -49,9 +60,14 @@ public class TicketMessageEntity {
     }
 
     public TicketMessageEntity(String ticketId, String role, String content, Instant createdAt) {
+        this(ticketId, role, content, null, createdAt);
+    }
+
+    public TicketMessageEntity(String ticketId, String role, String content, String clientMsgId, Instant createdAt) {
         this.ticketId = ticketId;
         this.role = role;
         this.content = content;
+        this.clientMsgId = clientMsgId;
         this.createdAt = createdAt;
     }
 
@@ -69,6 +85,10 @@ public class TicketMessageEntity {
 
     public String getContent() {
         return content;
+    }
+
+    public String getClientMsgId() {
+        return clientMsgId;
     }
 
     public Instant getCreatedAt() {

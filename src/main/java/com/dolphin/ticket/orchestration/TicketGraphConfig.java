@@ -13,6 +13,7 @@ import com.dolphin.ticket.action.ActionRegistry;
 import com.dolphin.ticket.rag.DocIngestService;
 import com.dolphin.ticket.rag.TicketRetriever;
 import com.dolphin.ticket.service.ApprovalService;
+import com.dolphin.ticket.service.ConversationService;
 import com.dolphin.ticket.service.TicketService;
 import com.dolphin.ticket.orchestration.state.TicketState;
 import com.dolphin.sla.SlaPriorityRules;
@@ -105,7 +106,7 @@ public class TicketGraphConfig {
         graph.addNode(NODE_DIAGNOSIS, node_async(state -> {
             String raw = TicketState.str(state, TicketState.RAW_MESSAGE, "");
             Map<String, Object> classification = TicketState.map(state, TicketState.CLASSIFICATION);
-            List<String> similar = ticketRetriever.retrieve(raw, 3);
+            List<String> similar = ticketRetriever.retrieve(retrievalQuery(state, raw), 3);
             DiagnosisAgent.DiagnosisOutcome outcome =
                     diagnosisAgent.diagnose(raw, classification, String.join("\n", similar),
                             TicketState.str(state, TicketState.CONVERSATION_HISTORY, ""));
@@ -123,7 +124,7 @@ public class TicketGraphConfig {
         graph.addNode(NODE_KB_ANSWER, node_async(state -> {
             String raw = TicketState.str(state, TicketState.RAW_MESSAGE, "");
             Map<String, Object> classification = TicketState.map(state, TicketState.CLASSIFICATION);
-            List<String> similar = ticketRetriever.retrieve(raw, 3);
+            List<String> similar = ticketRetriever.retrieve(retrievalQuery(state, raw), 3);
             String answer = kbAnswerAgent.answer(raw, classification, similar,
                     TicketState.str(state, TicketState.CONVERSATION_HISTORY, ""));
             Map<String, Object> out = new HashMap<>();
@@ -279,5 +280,23 @@ public class TicketGraphConfig {
 
         // 只构建图定义;编译收敛到 TicketGraphCompiler(每请求新建 CompiledGraph,并发根治)
         return graph;
+    }
+
+    /** 历史上下文注入检索的预算:约 300 字足够带上"是哪台实例、什么端口、什么报错" */
+    private static final int RETRIEVAL_HISTORY_CHARS = 300;
+
+    /**
+     * 检索 query(阶段4优化 O6):历史尾部 + 本轮原文。
+     *
+     * <p>追问常是"那怎么办""还是不行"这类省略句,只用本轮 RAW_MESSAGE 检索会丢掉工单主体,
+     * 相似工单/知识召回质量差;拼上历史尾部后,模糊追问仍能匹配到此前的实例、端口、错误码。
+     * 历史为空(首轮)时与原行为一致,只检索本轮原文。
+     */
+    static String retrievalQuery(OverAllState state, String raw) {
+        String history = TicketState.str(state, TicketState.CONVERSATION_HISTORY, "");
+        if (history.isBlank()) {
+            return raw;
+        }
+        return ConversationService.tail(history, RETRIEVAL_HISTORY_CHARS) + "\n" + raw;
     }
 }

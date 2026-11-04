@@ -2,10 +2,14 @@ package com.dolphin.ticket.memory;
 
 import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.checkpoint.BaseCheckpointSaver;
+import com.alibaba.cloud.ai.graph.checkpoint.Checkpoint;
 import com.alibaba.cloud.ai.graph.checkpoint.config.SaverConfig;
 import com.alibaba.cloud.ai.graph.checkpoint.constant.SaverConstant;
 import com.dolphin.ticket.repo.GraphCheckpointRepository;
 import org.springframework.stereotype.Component;
+
+import java.util.Map;
+import java.util.Optional;
 
 /**
  * 工单图 checkpoint 存储(会话记忆)。
@@ -45,5 +49,15 @@ public class TicketCheckpointStore {
      */
     public void clear(String ticketId) {
         saver.clear(RunnableConfig.builder().threadId(ticketId).build());
+    }
+
+    /**
+     * 读取本工单最近一次图快照的原始状态(阶段4优化 O3 用):
+     * 追问清断点前先取出旧 PENDING_ACTION,便于审计"原待审批动作作废"。
+     * 工单无断点(如首轮已结单)返回 empty。
+     */
+    public Optional<Map<String, Object>> snapshotState(String ticketId) {
+        return saver.get(RunnableConfig.builder().threadId(ticketId).build())
+                .map(Checkpoint::getState);
     }
 }

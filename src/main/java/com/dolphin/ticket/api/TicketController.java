@@ -4,11 +4,15 @@ import com.alibaba.cloud.ai.graph.CompiledGraph;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.dolphin.ticket.auth.ApiKeyAuthFilter;
+import com.dolphin.ticket.infra.audit.AuditLogger;
 import com.dolphin.ticket.memory.TicketCheckpointStore;
 import com.dolphin.ticket.orchestration.TicketGraphCompiler;
 import com.dolphin.ticket.orchestration.state.TicketState;
 import com.dolphin.ticket.service.ApprovalService;
 import com.dolphin.ticket.service.ConversationService;
+import com.dolphin.ticket.service.HumanTicketPool;
+import com.dolphin.ticket.service.TicketLockRegistry;
+import com.dolphin.ticket.service.TicketRoundService;
 import com.dolphin.ticket.service.TicketService;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
@@ -47,8 +51,11 @@ public class TicketController {
     public record SubmitRequest(String message) {
     }
 
-    /** 追问请求体(多轮对话:基于工单上下文重新评估本轮诉求) */
-    public record ReplyRequest(String message) {
+    /** 追问请求体(多轮对话:基于工单上下文重新评估本轮诉求;requestId 可选,用于入口幂等) */
+    public record ReplyRequest(String message, String requestId) {
+        public ReplyRequest(String message) {
+            this(message, null);
+        }
     }
 
     /** 审批请求体(approver/reason 可选,用于决策留痕) */
@@ -60,17 +67,29 @@ public class TicketController {
     private final ApprovalService approvalService;
     private final ConversationService conversationService;
     private final TicketCheckpointStore checkpointStore;
+    private final TicketLockRegistry lockRegistry;
+    private final TicketRoundService roundService;
+    private final AuditLogger auditLogger;
+    private final HumanTicketPool humanTicketPool;
 
     public TicketController(TicketGraphCompiler compiler,
                             TicketService ticketService,
                             ApprovalService approvalService,
                             ConversationService conversationService,
-                            TicketCheckpointStore checkpointStore) {
+                            TicketCheckpointStore checkpointStore,
+                            TicketLockRegistry lockRegistry,
+                            TicketRoundService roundService,
+                            AuditLogger auditLogger,
+                            HumanTicketPool humanTicketPool) {
         this.compiler = compiler;
         this.ticketService = ticketService;
         this.approvalService = approvalService;
         this.conversationService = conversationService;
         this.checkpointStore = checkpointStore;
+        this.lockRegistry = lockRegistry;
+        this.roundService = roundService;
+        this.auditLogger = auditLogger;
+        this.humanTicketPool = humanTicketPool;
     }
 
     /** 提交工单,同步执行图流程;归属取自鉴权上下文(API-Key 对应客户) */
@@ -212,6 +231,9 @@ public class TicketController {
      *
      * <p>状态约束:CLOSED 已结单不允许追问(409);ESCALATED 已转人工,
      * 只把追问记录进线程供专员查看,不再触发 AI 重跑。
+     *
+     * <p>阶段4优化:同一工单的追问按 ticketId 串行化(避免两请求同时清断点/跑图踩踏);
+     * 可选 requestId 做入口幂等;待审批单被追问时旧动作作废留痕;图执行异常补系统答复。
      */
     @PostMapping("/{id}/reply")
     public ResponseEntity<Map<String, Object>> reply(@PathVariable String id,
@@ -220,29 +242,66 @@ public class TicketController {
         if (request == null || request.message() == null || request.message().isBlank()) {
             return ResponseEntity.badRequest().body(Map.of("error", "message 不能为空"));
         }
-        Optional<TicketService.Ticket> ticket = ticketService.getForCustomer(id, currentCustomer(httpRequest));
+        String customerId = currentCustomer(httpRequest);
+        if (ticketService.getForCustomer(id, customerId).isEmpty()) {
+            return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                    .body(Map.of("error", "工单不存在: " + id));
+        }
+        // O1:同一工单的"读状态 → 判重 → 清断点 → invoke → 落库收尾"必须是一个临界区,
+        // 否则两个并发追问会读到同一个旧状态、同时清断点并以同一 threadId 跑图,线程与状态互相覆盖。
+        return lockRegistry.withLock(id, () -> doReply(id, customerId, request));
+    }
+
+    /** reply 临界区:锁内重新读状态,保证串行化后的判断基于最新数据 */
+    private ResponseEntity<Map<String, Object>> doReply(String id, String customerId, ReplyRequest request) {
+        Optional<TicketService.Ticket> ticket = ticketService.getForCustomer(id, customerId);
         if (ticket.isEmpty()) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND)
                     .body(Map.of("error", "工单不存在: " + id));
         }
         String status = ticket.get().status();
+
+        // O7 入口幂等:同一工单下同一 requestId 已处理过,直接返回首次结果标记,不重复落消息/跑图。
+        // 判重放在 CLOSED 校验之前:首次请求结单后客户端重试同一 requestId,应返回 200 duplicated 而非 409。
+        if (request.requestId() != null && !request.requestId().isBlank()
+                && conversationService.hasRequest(id, request.requestId())) {
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("ticketId", id);
+            body.put("status", status);
+            body.put("duplicated", true);
+            body.put("note", "重复请求(相同 requestId),本次未重复落消息,也未重复执行");
+            body.put("rounds", conversationService.messages(id).size());
+            return ResponseEntity.ok(body);
+        }
+
         if (TicketService.STATUS_CLOSED.equals(status)) {
             return ResponseEntity.status(HttpStatus.CONFLICT)
                     .body(Map.of("error", "工单已结单,如需继续处理请重新提交: " + id));
         }
-        // 历史先于本轮消息取出:转录里不含本轮内容,RAW_MESSAGE 与历史各司其职不重复
-        String history = conversationService.transcript(id);
-        conversationService.appendUser(id, request.message());
-
         if (TicketService.STATUS_ESCALATED.equals(status)) {
             // 已转人工:AI 不再介入,追问只入线程供人工专员跟进
+            conversationService.appendUser(id, request.message(), request.requestId());
             return ResponseEntity.ok(Map.of(
                     "ticketId", id,
                     "status", status,
                     "note", "工单已转人工处理,您的追问已记录,将由专员跟进回复"));
         }
 
-        ticketService.updateStatus(id, TicketService.STATUS_RUNNING);
+        // O3:待审批单被追问会清掉旧断点,旧 PENDING_ACTION 随之失效;
+        // 审批人手里的旧链接将无法再执行,必须在清断点前把"原动作"写进审计,保证可追溯。
+        if (TicketService.STATUS_PENDING_APPROVAL.equals(status)) {
+            String previousAction = checkpointStore.snapshotState(id)
+                    .map(s -> String.valueOf(s.getOrDefault(TicketState.PENDING_ACTION, "")))
+                    .orElse("")
+                    .trim();
+            String detail = "客户追问触发重新评估,原待审批动作作废:"
+                    + (previousAction.isEmpty() ? "(旧动作未取到,按 PENDING_APPROVAL 状态判定作废)" : previousAction);
+            auditLogger.log(id, "approval-invalidated", detail);
+            log.info("审批动作作废 ticketId={} previousAction={}", id, previousAction);
+        }
+
+        // O4:历史 + 客户消息 + RUNNING 状态同一短事务提交;图执行在事务之外(耗时不占连接)
+        String history = roundService.beginRound(id, request.message(), request.requestId());
         RunnableConfig config = RunnableConfig.builder().threadId(id).build();
         Optional<OverAllState> result;
         try {
@@ -255,8 +314,10 @@ public class TicketController {
                     TicketState.CONVERSATION_HISTORY, history), config);
         } catch (Exception e) {
             log.error("工单追问重跑失败 ticketId={}", id, e);
+            // 不得回滚客户消息(保留证据):补一条系统说明并转人工,避免"客户消息已落、线程无答复"
+            compensateReplyFailure(id, e);
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("error", "追问处理失败: " + e.getMessage()));
+                    .body(Map.of("error", "追问处理失败,已转人工跟进: " + e.getMessage()));
         }
 
         OverAllState state = result.orElse(null);
@@ -264,10 +325,11 @@ public class TicketController {
         String finalReply = state == null ? null : TicketState.str(state, TicketState.FINAL_REPLY, null);
         String replyDraft = state == null ? null : TicketState.str(state, TicketState.REPLY_DRAFT, null);
         String newStatus;
+        String statusPatch = null; // 仅当图未落状态(待审批)时才需要写;终态由节点落库,避免覆盖异步质检结论
         if (finalReply == null || finalReply.isBlank()) {
             if (!pendingAction.isBlank()) {
                 newStatus = TicketService.STATUS_PENDING_APPROVAL;
-                ticketService.updateStatus(id, newStatus);
+                statusPatch = newStatus;
             } else {
                 newStatus = ticketService.get(id).map(TicketService.Ticket::status)
                         .orElse(TicketService.STATUS_RUNNING);
@@ -276,12 +338,29 @@ public class TicketController {
             newStatus = ticketService.get(id).map(TicketService.Ticket::status)
                     .orElse(TicketService.STATUS_CLOSED);
         }
-        conversationService.appendAgent(id,
+        // O4:系统回复(+ 待审批状态)同一短事务提交
+        roundService.completeRound(id, statusPatch,
                 finalReply != null && !finalReply.isBlank() ? finalReply : replyDraft);
 
         Map<String, Object> body = buildResponse(id, newStatus, state);
         body.put("rounds", conversationService.messages(id).size());
         return ResponseEntity.ok(body);
+    }
+
+    /** reply 失败补偿:系统说明 + 转人工 + 审计,尽量不再抛出掩盖原始异常 */
+    private void compensateReplyFailure(String ticketId, Exception cause) {
+        try {
+            roundService.completeRound(ticketId, TicketService.STATUS_ESCALATED,
+                    "系统繁忙,您的诉求已记录,将转人工跟进。");
+            humanTicketPool.add(ticketId, "AI 追问处理异常", "图执行异常: " + cause.getMessage());
+        } catch (Exception compensationError) {
+            log.error("追问失败补偿写入异常 ticketId={}", ticketId, compensationError);
+        }
+        try {
+            auditLogger.log(ticketId, "reply-failed", "图执行异常:" + cause.getMessage());
+        } catch (Exception auditError) {
+            log.error("追问失败审计写入异常 ticketId={}", ticketId, auditError);
+        }
     }
 
     /** 对话线程查询(租户隔离):按时间序返回本工单全部沟通记录 */

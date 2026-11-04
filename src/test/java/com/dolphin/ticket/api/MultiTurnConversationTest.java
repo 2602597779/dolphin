@@ -2,6 +2,8 @@ package com.dolphin.ticket.api;
 
 import com.dolphin.customer.CustomerSeeder;
 import com.dolphin.ticket.auth.ApiKeyAuthFilter;
+import com.dolphin.ticket.infra.audit.AuditLogEntity;
+import com.dolphin.ticket.infra.audit.AuditLogRepository;
 import com.dolphin.ticket.service.ConversationService;
 import com.dolphin.ticket.service.TicketService;
 import org.junit.jupiter.api.BeforeEach;
@@ -12,7 +14,13 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.test.context.ActiveProfiles;
 
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -44,6 +52,8 @@ class MultiTurnConversationTest {
     private ConversationService conversationService;
     @Autowired
     private CustomerSeeder customerSeeder;
+    @Autowired
+    private AuditLogRepository auditLogRepository;
 
     @BeforeEach
     void seedCustomers() {
@@ -141,7 +151,87 @@ class MultiTurnConversationTest {
         assertThat(((Map<?, ?>) msgs.get(0)).get("role")).isEqualTo("USER");
     }
 
+    @Test
+    void pendingTicket_replyInvalidatesPreviousApprovalWithAudit() {
+        String id = submit("cust-001", "我的ECS实例连不上了,ssh 都登不上");
+        assertThat(ticketService.get(id).orElseThrow().status())
+                .isEqualTo(TicketService.STATUS_PENDING_APPROVAL);
+
+        // O3:追问会清旧断点,旧待审批动作作废必须留痕(含原动作,审批人旧链接失效可追溯)
+        ticketController.reply(id, new TicketController.ReplyRequest("再补充:重启之后仍然连不上"),
+                asCustomer("cust-001"));
+
+        List<AuditLogEntity> invalidated = auditLogRepository.findByAction("approval-invalidated")
+                .stream().filter(e -> id.equals(e.getSessionId())).toList();
+        assertThat(invalidated).hasSize(1);
+        assertThat(invalidated.get(0).getDetail())
+                .contains("原待审批动作作废", "restartInstance:i-abc123");
+    }
+
+    @Test
+    void replyWithSameRequestIdIsIdempotent() {
+        String id = submit("cust-001", "我的ECS实例连不上了,ssh 都登不上");
+        String requestId = "req-idem-1";
+
+        // O7:首次追问按最新诉求改道安全组并结单
+        Map<String, Object> first = body(ticketController.reply(id,
+                new TicketController.ReplyRequest("其实是安全组没放行443端口,帮我开一下", requestId),
+                asCustomer("cust-001")));
+        assertThat(first.get("status")).isEqualTo(TicketService.STATUS_CLOSED);
+        int roundsAfterFirst = conversationService.messages(id).size();
+        assertThat(roundsAfterFirst).isEqualTo(4);
+
+        // 网络重试同一 requestId:返回 duplicated 标记,不重复落消息、不重复跑图
+        Map<String, Object> retry = body(ticketController.reply(id,
+                new TicketController.ReplyRequest("其实是安全组没放行443端口,帮我开一下", requestId),
+                asCustomer("cust-001")));
+        assertThat(retry).containsEntry("duplicated", true);
+        assertThat(retry.get("status")).isEqualTo(TicketService.STATUS_CLOSED);
+        assertThat((Integer) retry.get("rounds")).isEqualTo(roundsAfterFirst);
+        assertThat(conversationService.messages(id)).hasSize(roundsAfterFirst);
+    }
+
+    @Test
+    void concurrentRepliesOnSameTicketAreSerialized() throws Exception {
+        String id = submit("cust-001", "我的ECS实例连不上了,ssh 都登不上");
+        int baseMessages = conversationService.messages(id).size();
+
+        // O1:两线程同时追问同一单,锁内串行执行;线程消息必须按整轮交替,不能出现半轮穿插
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<ResponseEntity<Map<String, Object>>>> futures = List.of(
+                executor.submit(() -> replyAfter(start, id, "补充:实例还是连不上", "concurrent-1")),
+                executor.submit(() -> replyAfter(start, id, "再补充:重启之后仍然连不上", "concurrent-2")));
+        start.countDown();
+
+        for (Future<ResponseEntity<Map<String, Object>>> future : futures) {
+            ResponseEntity<Map<String, Object>> response = future.get(15, TimeUnit.SECONDS);
+            assertThat(response.getStatusCode().value()).isEqualTo(200);
+            assertThat((String) response.getBody().get("status"))
+                    .isEqualTo(TicketService.STATUS_PENDING_APPROVAL);
+        }
+        executor.shutdown();
+
+        var messages = conversationService.messages(id);
+        assertThat(messages).hasSize(baseMessages + 4);
+        assertThat(messages).extracting(ConversationService.Message::role)
+                .containsExactly("USER", "AGENT", "USER", "AGENT", "USER", "AGENT");
+        String userContents = messages.stream()
+                .filter(m -> "USER".equals(m.role()))
+                .map(ConversationService.Message::content)
+                .reduce("", (a, b) -> a + "|" + b);
+        assertThat(userContents)
+                .contains("补充:实例还是连不上", "再补充:重启之后仍然连不上");
+    }
+
     // ---- 辅助 ----
+
+    private ResponseEntity<Map<String, Object>> replyAfter(CountDownLatch start, String id,
+                                                           String message, String requestId) throws InterruptedException {
+        start.await();
+        return ticketController.reply(id, new TicketController.ReplyRequest(message, requestId),
+                asCustomer("cust-001"));
+    }
 
     private String submit(String customerId, String message) {
         Map<String, Object> body = body(ticketController.submit(

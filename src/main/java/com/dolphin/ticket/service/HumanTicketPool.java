@@ -32,11 +32,14 @@ public class HumanTicketPool {
     private final HumanTaskRepository repository;
     private final AuditLogger auditLogger;
     private final TicketService ticketService;
+    private final ConversationService conversationService;
 
-    public HumanTicketPool(HumanTaskRepository repository, AuditLogger auditLogger, TicketService ticketService) {
+    public HumanTicketPool(HumanTaskRepository repository, AuditLogger auditLogger, TicketService ticketService,
+                           ConversationService conversationService) {
         this.repository = repository;
         this.auditLogger = auditLogger;
         this.ticketService = ticketService;
+        this.conversationService = conversationService;
     }
 
     /** 转人工落队列(同工单重复落队以最新一次为准:整行覆盖,状态回到 WAITING) */
@@ -73,7 +76,7 @@ public class HumanTicketPool {
                 });
     }
 
-    /** 完结:CLAIMED → RESOLVED,工单状态转 CLOSED */
+    /** 完结:CLAIMED → RESOLVED,工单状态转 CLOSED,并把人工答复补进对话线程(阶段4优化 O2) */
     public Optional<HumanTask> resolve(String ticketId, String note) {
         return repository.findById(ticketId)
                 .filter(e -> STATUS_CLAIMED.equals(e.getStatus()))
@@ -82,6 +85,11 @@ public class HumanTicketPool {
                     e.setUpdatedAt(Instant.now());
                     repository.save(e);
                     ticketService.updateStatus(ticketId, TicketService.STATUS_CLOSED);
+                    // 客户线程缺最后一环时,人工完结后客户看到的仍是"已转人工"而不知处理结果;
+                    // 这里补一条系统侧答复,线程闭环可回看(重复 resolve 已被状态过滤拦截,不会重复落消息)
+                    conversationService.appendAgent(ticketId, note == null || note.isBlank()
+                            ? "人工处理完成,工单已结单"
+                            : "人工处理完成: " + note);
                     auditLogger.log(ticketId, "human-pool", "完结 note=" + (note == null ? "" : note));
                     return toDto(e);
                 });

@@ -103,6 +103,29 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 - Agent 侧：diagnosis/kb/reply 的 user 提示词均拼"对话历史"段落（空历史不加段落，首轮零影响）；离线桩"本轮诉求优先"判定（标记前文本命中剧本特征则按本轮，否则回退全文）
 - 验证双保险：`MultiTurnConversationTest` 5 用例（offline+H2 直调 Controller）+ 真实运行复验（改口重跑 + 审计 :BASELINE/:VERIFY 留痕 + 质检 PASS，线程 4 条完整）
 
+### 阶段 4 后续优化（阶段 4.1，已完成 2026-11-04）
+
+> 详细任务清单（含代码证据、实现方案、验收标准、执行顺序）：`.trae/spec/p4-conversation-optimize/tasks.md`
+> 该目录在 .gitignore 内不入库，故此处保留摘要；新会话优先读该文件，读不到则按下列摘要执行。
+
+- [x] O1 reply 并发串行化：`TicketLockRegistry` 按 ticketId 加锁，把"读状态→判重→清断点→invoke→落库收尾"整段串行化；锁对象引用计数归零即移除。多实例需 DB 乐观锁/分布式锁，已写入类注释（`TicketLockRegistryTest` 3 用例 + 并发 reply 集成用例）
+- [x] O2 人工完结答复入线程：`HumanTicketPool.resolve` 完结后 `appendAgent`（note 空则用默认文案），重复 resolve 不重复落消息（`HumanTicketPoolTest` +2 用例）
+- [x] O3 审批作废留痕：reply 在 clear 前读旧 checkpoint 的 `PENDING_ACTION`，落审计 `approval-invalidated`（含原动作，取不到则按状态标记）；`TicketCheckpointStore.snapshotState` 新增（集成用例断言审计含 `restartInstance:i-abc123`）
+- [x] O4 短事务与失败补偿：`TicketRoundService.beginRound/completeRound` 两个短事务；`graph.invoke` 保持在事务外；异常分支保留客户消息、补系统说明、转人工池、写 `reply-failed` 审计（`ReplyFailureCompensationTest` 1 用例）
+- [x] O5 转录逐行截断：`ConversationService.tail` 按整行从尾部累加，单行超预算才截断并加 `…`；`ConversationServiceTest` 3 用例覆盖整行保留/单行截断/预算边界
+- [x] O6 检索带上文：`TicketGraphConfig.retrievalQuery` = 历史尾部 300 字 + 本轮原文，历史为空回退纯原文（`TicketGraphRetrievalQueryTest` 2 用例）
+- [x] O7 对话入口幂等：`ReplyRequest` 加可选 `requestId`；`ticket_message.client_msg_id` + `(ticket_id, client_msg_id)` 唯一约束；重复请求返回 `duplicated=true` 且不重复落消息（集成用例覆盖"首次结单后同号重试仍 200"）
+- [x] O8 异步跑图（只写面试口径，不改代码）：同步 invoke 占 HTTP 线程，演进方向为 202 + 轮询/SSE（状态机增加 PROCESSING、超时补偿、消息顺序保证）
+- [x] 收尾验证：`mvn test` 207 用例 0 失败（原 193 + 新增 14）；README 剧本 6 补阶段 4.1 加固说明；本文件勾选
+- [x] 收尾 commit：本地 commit（msg: `阶段4优化:并发保护+人工回复入线程+审批作废留痕+短事务补偿`，**仅本地，未推远程**）
+
+#### 阶段 4.1 关键落点（面试话术）
+
+- 并发：锁的临界区覆盖"读最新状态→requestId 判重→审批作废留痕→清 checkpoint→invoke→写线程/状态"，锁内二次读状态保证串行后的判断基于最新数据；锁 map 带引用计数避免按工单号无限堆积
+- 幂等：先判 `(ticketId, requestId)` 再判 CLOSED——首次请求已结单后客户端重试同号应返回 `duplicated=true`（200），而不是误导性的 409；空 requestId 统一存 null，避免撞唯一约束
+- 事务边界：只把"消息 + 状态"的短写收敛进事务，`graph.invoke`（云调用 + 退避轮询）始终在事务外；失败补偿不回滚客户消息（保留证据）
+- 可观测：`approval-invalidated` 与 `reply-failed` 两条审计是面试可讲的可追溯性设计；`duplicated` 标记让客户端重试语义明确
+
 ---
 
 ## 叙事边界（面试话术，勿越界）
@@ -113,10 +136,10 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 
 ## 当前断点（每次会话结束必须更新）
 
-**最后更新**：2026-11-04（第五次会话：阶段 4 收尾）
-**已完成**：H0~H3；**阶段 1~3 全部完成**（均已 commit）；**阶段 4 全部完成**（多轮对话：ticket_message 表 + ConversationService 线程服务 + reply 接口"清 checkpoint 后按最新上下文从头重跑" + messages 线程查询 + 三 Agent 历史注入 + 离线桩本轮优先 + 12 个新用例 + README 剧本 6 真实输出，`mvn test` 193 用例 0 失败）
-**下一步**：可停手；若继续，从**阶段 5 钉钉卡片审批**（webhook 回调 resume）开始
-**git 状态**：阶段 4 全部改动（ticket_message 实体/仓库 + ConversationService + reply/messages 接口 + Agent history 参数 + ScriptedChatModel 多轮感知 + 2 个新测试类 + README 剧本 6 + 本文件）待以阶段 4 msg commit；注意 LeetcodeTest.java 本会话有用户刷题改动（threeSum），一并入库
+**最后更新**：2026-11-04（第六次会话：阶段 4.1 后续优化收尾）
+**已完成**：H0~H3；**阶段 1~3 全部完成**（均已 commit）；**阶段 4 全部完成**（commit `f63a28c`：ticket_message 表 + ConversationService 线程服务 + reply 接口"清 checkpoint 后按最新上下文从头重跑" + messages 线程查询 + 三 Agent 历史注入 + 离线桩本轮优先 + 12 个新用例 + README 剧本 6 真实输出）；**阶段 4.1 后续优化 O1~O7 全部完成**（并发串行化 `TicketLockRegistry`、人工完结答复入线程、审批作废审计 `approval-invalidated`、短事务 `TicketRoundService` + 失败补偿转人工 `reply-failed`、转录逐行截断、检索带上文、入口幂等 `requestId` + 唯一约束；`mvn test` 207 用例 0 失败 = 原 193 + 新增 14）
+**下一步**：可停手；若继续，从**阶段 5 钉钉卡片审批**（webhook 回调 resume）开始。O8 异步跑图本期只留面试口径（202 + 轮询/SSE、状态机增加 PROCESSING、超时补偿与同单消息顺序），未改代码
+**git 状态**：阶段 4.1 全部改动（`TicketLockRegistry`/`TicketRoundService` 两个新类 + Controller reply 改造 + ConversationService tail/requestId + 消息表 client_msg_id 唯一约束 + 检索带上文 + HumanTicketPool 回线程 + 3 个新测试类 + 4 个测试类补齐 + README 剧本 6 加固段 + 本文件）已以阶段 4.1 msg 本地 commit，**仅本地未推远程**；工作区干净
 
 ### 已提交的进度凭证（git log 摘要）
 
@@ -127,6 +150,7 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 - `阶段2:运营指标API(MTTR/自动化解决率/升级率/质检通过率)`（README 剧本 4 真实输出 + 本文件勾选）
 - `阶段3:SLA优先级+超时自动升级人工池`（sla 包 4 类 + triage 分级落库 + sla_breach_at 留痕 + 指标 API 扩展 + 12 用例 + README 剧本 5）
 - `阶段4:工单多轮对话(对话历史进图状态+PENDING单上下文续跑)`（ticket_message 三件套 + reply/messages 接口 + Agent history 注入 + 12 用例 + README 剧本 6）
+- `阶段4优化:并发保护+人工回复入线程+审批作废留痕+短事务补偿`（阶段 4.1 O1~O7：TicketLockRegistry 串行锁 + TicketRoundService 短事务 + requestId 幂等 + `approval-invalidated`/`reply-failed` 审计 + 逐行截断转录 + 检索带上文 + 人工完结回线程 + 14 新用例 + README 剧本 6 加固段）
 
 ### 阶段 1 关键落点（面试话术/后续阶段引用）
 

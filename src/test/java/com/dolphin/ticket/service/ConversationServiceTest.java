@@ -15,7 +15,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 阶段4 对话线程服务回归:消息追加/按序读取/历史转录。
  *
  * <p>验证点:线程旧→新排序、系统侧空回复不落消息(图异常中断只保留客户侧发言)、
- * 转录格式("客户: "/"客服: ")、超长线程尾部截断(防撑爆提示词)。
+ * 转录格式("客户: "/"客服: ")、超长线程按整行从尾部截断(阶段4优化 O5)、
+ * requestId 幂等判重(阶段4优化 O7)。
  */
 @DataJpaTest
 @Import(ConversationService.class)
@@ -65,17 +66,61 @@ class ConversationServiceTest {
     }
 
     @Test
-    void transcriptTruncatesToTail() {
-        // 超长线程只保留尾部 6000 字符:历史是上下文参考,尾部(最新沟通)相关性最高
-        StringBuilder big = new StringBuilder();
-        for (int i = 0; i < 500; i++) {
-            big.append("第").append(i).append("轮沟通记录,内容占位。");
+    void transcriptOverBudgetKeepsWholeLinesAndLatestMessage() {
+        // O5:超长线程按整行从尾部保留,首行必须是完整消息行(不能以半句/半行开头)
+        for (int i = 0; i < 100; i++) {
+            String content = "第" + i + "轮沟通记录:" + "内容占位".repeat(20);
+            if (i % 2 == 0) {
+                conversationService.appendUser("t-103", content);
+            } else {
+                conversationService.appendAgent("t-103", content);
+            }
         }
-        conversationService.appendUser("t-103", big.toString());
         String transcript = conversationService.transcript("t-103");
-        assertThat(transcript.length()).isLessThanOrEqualTo(6000);
-        assertThat(transcript.endsWith("客户: " + big)).isFalse(); // 已被截断
-        assertThat(transcript).endsWith(big.substring(big.length() - 6000 + "客户: ".length()));
+        String[] lines = transcript.split("\n");
+
+        assertThat(transcript.length()).isLessThanOrEqualTo(ConversationService.TRANSCRIPT_MAX_CHARS);
+        assertThat(lines.length).isGreaterThan(1);
+        assertThat(lines).allSatisfy(line -> assertThat(line).matches("^(客户|客服): .+"));
+        // 尾部是最新一轮沟通(第 99 轮),旧消息整行丢弃
+        assertThat(lines[lines.length - 1]).startsWith("客服: 第99轮沟通记录:");
+        assertThat(transcript).doesNotContain("第0轮沟通记录");
+    }
+
+    @Test
+    void transcriptSingleOverlongLineIsTruncatedWithEllipsis() {
+        // 单行就超预算时只能截断该行:省略标记提示更早内容被裁掉,尾部仍是最新内容
+        String big = "第0轮沟通记录,内容占位。".repeat(500);
+        conversationService.appendUser("t-104", big);
+
+        String transcript = conversationService.transcript("t-104");
+        assertThat(transcript.length()).isLessThanOrEqualTo(ConversationService.TRANSCRIPT_MAX_CHARS);
+        assertThat(transcript).startsWith("…");
+        assertThat(transcript).endsWith(big.substring(big.length() - (ConversationService.TRANSCRIPT_MAX_CHARS - 1)));
+    }
+
+    @Test
+    void tailKeepsWholeLinesWithinBudget() {
+        String text = "最旧一行\n中间一行\n最新一行";
+        // 预算 12:从尾部累加"最新一行"(4)+换行1+"中间一行"(4)=9,"最旧一行"再+5=14 超预算 → 整行丢弃
+        assertThat(ConversationService.tail(text, 12)).isEqualTo("中间一行\n最新一行");
+        assertThat(ConversationService.tail(text, 0)).isEmpty();
+        assertThat(ConversationService.tail("", 10)).isEmpty();
+        assertThat(ConversationService.tail("短文本", 10)).isEqualTo("短文本");
+    }
+
+    @Test
+    void requestIdsAreTrackedPerTicket() {
+        conversationService.appendUser("t-a", "第一轮", "req-1");
+        assertThat(conversationService.hasRequest("t-a", "req-1")).isTrue();
+        assertThat(conversationService.hasRequest("t-a", "req-2")).isFalse();
+        // 请求号判重按工单隔离:同一 requestId 在别单不算重复
+        assertThat(conversationService.hasRequest("t-b", "req-1")).isFalse();
+        assertThat(conversationService.hasRequest("t-a", null)).isFalse();
+        // 空请求号统一落 null,不会撞唯一约束
+        conversationService.appendUser("t-a", "第二轮", " ");
+        conversationService.appendUser("t-a", "第三轮", "");
+        assertThat(conversationService.messages("t-a")).hasSize(3);
     }
 
     @Test
