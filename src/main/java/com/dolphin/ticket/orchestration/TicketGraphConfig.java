@@ -107,7 +107,8 @@ public class TicketGraphConfig {
             Map<String, Object> classification = TicketState.map(state, TicketState.CLASSIFICATION);
             List<String> similar = ticketRetriever.retrieve(raw, 3);
             DiagnosisAgent.DiagnosisOutcome outcome =
-                    diagnosisAgent.diagnose(raw, classification, String.join("\n", similar));
+                    diagnosisAgent.diagnose(raw, classification, String.join("\n", similar),
+                            TicketState.str(state, TicketState.CONVERSATION_HISTORY, ""));
             Map<String, Object> out = new HashMap<>();
             out.put(TicketState.DIAGNOSIS_REPORT, outcome.report());
             out.put(TicketState.SIMILAR_TICKETS, similar);
@@ -123,7 +124,8 @@ public class TicketGraphConfig {
             String raw = TicketState.str(state, TicketState.RAW_MESSAGE, "");
             Map<String, Object> classification = TicketState.map(state, TicketState.CLASSIFICATION);
             List<String> similar = ticketRetriever.retrieve(raw, 3);
-            String answer = kbAnswerAgent.answer(raw, classification, similar);
+            String answer = kbAnswerAgent.answer(raw, classification, similar,
+                    TicketState.str(state, TicketState.CONVERSATION_HISTORY, ""));
             Map<String, Object> out = new HashMap<>();
             out.put(TicketState.REPLY_DRAFT, answer == null ? "" : answer);
             out.put(TicketState.SIMILAR_TICKETS, similar);
@@ -138,7 +140,8 @@ public class TicketGraphConfig {
             String content = diagnosisReport.isBlank()
                     ? TicketState.str(state, TicketState.REPLY_DRAFT, "")
                     : diagnosisReport;
-            String draft = replyAgent.compose(raw, classification, content);
+            String draft = replyAgent.compose(raw, classification, content,
+                    TicketState.str(state, TicketState.CONVERSATION_HISTORY, ""));
             return Map.of(TicketState.REPLY_DRAFT, draft == null ? "" : draft);
         }));
 

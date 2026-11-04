@@ -74,11 +74,36 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 
 ## 第二梯队（有余力再做，不影响主线）
 
-- [ ] 阶段 4：工单多轮对话 `POST /api/tickets/{id}/reply`（对话历史进图状态，PENDING 单基于上下文续跑）——业务真实感最大单点
+- [x] 阶段 4：工单多轮对话 `POST /api/tickets/{id}/reply`（对话历史进图状态，PENDING 单基于上下文续跑）——业务真实感最大单点
 - [ ] 阶段 5：钉钉卡片审批（审批人在钉钉点通过 → webhook 回调 resume），可截图讲的落地场景
 - [ ] 阶段 6：运营看板简单页面（消费指标 API）
 - [ ] 阶段 7：GitHub Actions CI（mvn test）
 - [ ] 阶段 8：Flyway 管 schema（替换 ddl-auto: update）
+
+### 阶段 4：工单多轮对话（约 1~2 天）
+
+**业务目标**：客户在同一工单下追问，对话历史注入图状态，PENDING 单基于上下文续跑，客户无需重复背景。
+
+任务拆解：
+- [x] T4.1 `ticket_message` 表 + `TicketMessageEntity` + `TicketMessageRepository`（ticket_id 索引）；`ConversationService`：追加客户/系统消息（空系统回复不落）、按序取线程、历史转录（"客户: "/"客服: "逐行，尾部 6000 字符截断防撑爆提示词）
+- [x] T4.2 `TicketState` 新增 `CONVERSATION_HISTORY` 状态键（ReplaceStrategy）；diagnosis/kb/reply 三 Agent 签名加 history 参数并拼入 user 提示词（空历史不加段落）；告警链路传空串
+- [x] T4.3 `submit` 首条诉求入线程、结单终稿/待审批草稿入线程；`approve` 结单终稿入线程
+- [x] T4.4 `POST /api/tickets/{id}/reply`：归属校验（跨客户 404）→ CLOSED 409 → 先取历史再落本轮消息 → ESCALATED 只记录不重跑（note 说明）→ 清旧 checkpoint（reply 是"从头重跑"而非 resume 旧断点）→ 历史注入图状态 invoke → 状态推进与终稿/草稿入线程；`GET /api/tickets/{id}/messages` 线程查询（租户隔离）
+- [x] T4.5 离线演示多轮感知：`ScriptedChatModel` 分诊/诊断/回复均"本轮诉求优先"（取"对话历史"标记前的本轮文本判定，本轮无特征回退全文），避免历史旧关键词压过本轮改口
+- [x] T4.6 单测——`ConversationServiceTest` 6 用例（线程排序/空系统回复跳过/空线程/转录格式/尾部截断/线程隔离）+ `MultiTurnConversationTest` 5 用例（PENDING 单改口重跑结单+线程 4 条完整/CLOSED 409/ESCALATED 只记录/空消息 400/跨客户 404+线程租户隔离）+ `KbAnswerAgentTest` 补历史拼接用例
+- [x] T4.7 README 剧本 6 已写入真实运行输出（第 1 轮重启审批中断 → 第 2 轮改口安全组从头重跑直执结单，含基线验证与线程回看）；`mvn test` 193 用例 0 失败；commit（msg: "阶段4:工单多轮对话(对话历史进图状态+PENDING单上下文续跑)"）
+
+**完成标准**：PENDING_APPROVAL 单追问改口后按本轮诉求从头重跑结单；线程全程可回看；`mvn test` 全绿。✅ 已达成（2026-11-04 真实运行复验：工单 TMW1IC0QD1，第 1 轮 restartInstance 审批中断 → 第 2 轮改口安全组 → authorizeSecurityGroup 免审批直执 + 规则版本 0→1 基线验证 + 质检 PASS，rounds=4）
+
+### 阶段 4 关键落点（面试话术/后续阶段引用）
+
+- 数据模型：`ticket_message` 表一单一线程（USER/AGENT 角色 + 时间戳，ticket_id 索引）；`ConversationService.transcript` 渲染为"客户: /客服: "逐行转录，尾部 6000 字符截断（历史是上下文参考，最新沟通相关性最高）
+- 核心语义：reply = **按最新上下文从头重跑**，不是续跑旧断点——旧 checkpoint 停留在上一轮中断点（如审批前），带着它 invoke 会直接 resume；故先 `checkpointStore.clear(threadId)` 再注入 `CONVERSATION_HISTORY` invoke。对比 approve = 基于原断点 resume
+- 状态约束：CLOSED 409（结单后重新提交）、ESCALATED 追问只入线程供专员查看（AI 不再介入）、空消息 400、跨客户 404（复用 getForCustomer，不泄露存在性）
+- Agent 侧：diagnosis/kb/reply 的 user 提示词均拼"对话历史"段落（空历史不加段落，首轮零影响）；离线桩"本轮诉求优先"判定（标记前文本命中剧本特征则按本轮，否则回退全文）
+- 验证双保险：`MultiTurnConversationTest` 5 用例（offline+H2 直调 Controller）+ 真实运行复验（改口重跑 + 审计 :BASELINE/:VERIFY 留痕 + 质检 PASS，线程 4 条完整）
+
+---
 
 ## 叙事边界（面试话术，勿越界）
 
@@ -88,10 +113,10 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 
 ## 当前断点（每次会话结束必须更新）
 
-**最后更新**：2026-11-04（第四次会话收尾）
-**已完成**：H0~H3；**阶段 1 全部完成**（已 commit）；**阶段 2 全部完成**（已 commit）；**阶段 3 全部完成**（SLA：SlaPriorityRules 确定性分级 + SlaMonitor 双计时器巡检 + sla_breach_at 留痕/幂等升级人工池/钉钉加急降级 + 指标 API byPriority/sla 字段 + 12 个新用例 + README 剧本 5 真实输出，`mvn test` 181 用例 0 失败）
-**下一步**：第一梯队（阶段 1~3）全部收口，可停手；若继续，从第二梯队**阶段 4 工单多轮对话**（`POST /api/tickets/{id}/reply`，业务真实感最大单点）开始
-**git 状态**：阶段 3 全部改动（sla 包 + ticket/metrics 接线 + application.yml + README + 本文件）以阶段 3 msg 入库后，工作区应保持干净
+**最后更新**：2026-11-04（第五次会话：阶段 4 收尾）
+**已完成**：H0~H3；**阶段 1~3 全部完成**（均已 commit）；**阶段 4 全部完成**（多轮对话：ticket_message 表 + ConversationService 线程服务 + reply 接口"清 checkpoint 后按最新上下文从头重跑" + messages 线程查询 + 三 Agent 历史注入 + 离线桩本轮优先 + 12 个新用例 + README 剧本 6 真实输出，`mvn test` 193 用例 0 失败）
+**下一步**：可停手；若继续，从**阶段 5 钉钉卡片审批**（webhook 回调 resume）开始
+**git 状态**：阶段 4 全部改动（ticket_message 实体/仓库 + ConversationService + reply/messages 接口 + Agent history 参数 + ScriptedChatModel 多轮感知 + 2 个新测试类 + README 剧本 6 + 本文件）待以阶段 4 msg commit；注意 LeetcodeTest.java 本会话有用户刷题改动（threeSum），一并入库
 
 ### 已提交的进度凭证（git log 摘要）
 
@@ -101,6 +126,7 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 - `fix：dolohin`（阶段 2 全部代码：metrics 包 + TicketEntity closed_at/priority + 指标聚合查询 + MetricsServiceTest，由用户手动提交）
 - `阶段2:运营指标API(MTTR/自动化解决率/升级率/质检通过率)`（README 剧本 4 真实输出 + 本文件勾选）
 - `阶段3:SLA优先级+超时自动升级人工池`（sla 包 4 类 + triage 分级落库 + sla_breach_at 留痕 + 指标 API 扩展 + 12 用例 + README 剧本 5）
+- `阶段4:工单多轮对话(对话历史进图状态+PENDING单上下文续跑)`（ticket_message 三件套 + reply/messages 接口 + Agent history 注入 + 12 用例 + README 剧本 6）
 
 ### 阶段 1 关键落点（面试话术/后续阶段引用）
 

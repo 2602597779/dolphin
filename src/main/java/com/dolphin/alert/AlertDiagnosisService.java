@@ -119,7 +119,7 @@ public class AlertDiagnosisService {
                     "urgency", urgencyOf(alert));
             List<String> similar = retrieveSafe(alert.summary());
             DiagnosisAgent.DiagnosisOutcome outcome =
-                    diagnosisAgent.diagnose(rawMessage, classification, String.join("\n", similar));
+                    diagnosisAgent.diagnose(rawMessage, classification, String.join("\n", similar), "");
 
             if (outcome.report() == null || outcome.report().isBlank()) {
                 store.add(alert.fingerprint(), alert.alertName(), task.getName(),

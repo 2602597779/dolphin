@@ -328,6 +328,71 @@ curl.exe -s http://localhost:8080/api/metrics/summary
 
 路由：`triage 节点 → SlaPriorityRules 推导 priority 落 ticket.priority → SlaMonitor(@Scheduled) 扫未闭环+未留痕工单 → 双计时器判定 → breach(留痕 + 入池 + 审计 + 加急)`。
 
+### 剧本 6：工单多轮对话——PENDING 单基于上下文续跑，客户无需重复背景
+
+真实客服场景里客户很少一次说清诉求。多轮对话（阶段 4）允许客户在同一工单下追问：对话历史（`ticket_message` 表）注入图状态，分诊/诊断/问答/回复各 Agent 均能看到此前沟通，按**最新上下文从头重跑**——客户上轮说"连不上"，本轮改口"其实是安全组没放行 443"，系统按本轮诉求改道（不再卡在上一轮的重启审批断点）。
+
+第 1 轮：提交故障单，诊断出需审批的重启动作 → 中断在审批前，系统回复草稿作为首次答复入线程：
+
+```bash
+curl.exe -s --noproxy "*" -X POST http://localhost:8080/api/tickets/submit -H "X-API-Key: ak-demo-cust-001" -H "Content-Type: application/json" --data-binary "@round1.json"
+# round1.json: {"message":"我的ECS实例连不上了,ssh 都登不上"}
+```
+
+```json
+{
+    "ticketId":  "TMW1IC0QD1",
+    "status":  "PENDING_APPROVAL",
+    "replyDraft":  "您好,关于实例 i-abc123 无法连接的问题:经诊断,实例操作系统疑似夯死导致远程连接无响应。重启实例属于变更操作,已提交人工审批,审批通过后将立即执行并同步结果;若处理后仍无法连接,我们将升级人工进一步排查系统盘与内核日志。给您带来不便敬请谅解。",
+    "finalReply":  null,
+    "pendingAction":  "restartInstance:i-abc123"
+}
+```
+
+第 2 轮：客户追问改口 → 先清旧 checkpoint（reply 语义是"从头重跑"而非"续跑旧断点"），再把对话历史注入图状态重新评估 → 本轮命中免审批的安全组放行动作，直执+基线验证后结单：
+
+```bash
+curl.exe -s --noproxy "*" -X POST http://localhost:8080/api/tickets/TMW1IC0QD1/reply -H "X-API-Key: ak-demo-cust-001" -H "Content-Type: application/json" --data-binary "@round2.json"
+# round2.json: {"message":"其实是安全组没放行443端口,帮我开一下"}
+```
+
+```json
+{
+    "ticketId":  "TMW1IC0QD1",
+    "status":  "CLOSED",
+    "replyDraft":  "您好,关于 443 端口访问失败的问题:经诊断,安全组 sg-demo 入方向未放行 TCP 443。……",
+    "finalReply":  "您好,关于 443 端口访问失败的问题:……\n\n处理结果:提交:已向安全组 sg-demo 添加规则:放行 TCP 443 | 验证:外部探测 localhost:63560 连通成功(第2次尝试,观测到本次新规则版本 0→1)",
+    "pendingAction":  "authorizeSecurityGroup:sg-demo:port=443",
+    "rounds":  4
+}
+```
+
+关键点：第 2 轮的 finalReply 是围绕**本轮**安全组诉求（含真实执行与验证结果），而不是沿用上轮的"重启实例"话术——对话历史只是上下文参考，最新诉求优先。
+
+全程线程可回看（客户/系统消息按序交替，租户隔离）：
+
+```bash
+curl.exe -s --noproxy "*" http://localhost:8080/api/tickets/TMW1IC0QD1/messages -H "X-API-Key: ak-demo-cust-001"
+```
+
+```json
+{
+    "ticketId":  "TMW1IC0QD1",
+    "ticketStatus":  "CLOSED",
+    "count":  4,
+    "messages":  [
+        { "role":  "USER",  "content":  "我的ECS实例连不上了,ssh 都登不上", "createdAt":  "2026-11-04T02:38:25.025272Z" },
+        { "role":  "AGENT", "content":  "您好,关于实例 i-abc123 无法连接的问题:……已提交人工审批……", "createdAt":  "2026-11-04T02:38:25.163847Z" },
+        { "role":  "USER",  "content":  "其实是安全组没放行443端口,帮我开一下", "createdAt":  "2026-11-04T02:38:37.539320Z" },
+        { "role":  "AGENT", "content":  "您好,关于 443 端口访问失败的问题:……验证:外部探测 localhost:63560 连通成功(第2次尝试,观测到本次新规则版本 0→1)", "createdAt":  "2026-11-04T02:38:39.637163Z" }
+    ]
+}
+```
+
+状态约束：`CLOSED` 已结单拒绝追问（HTTP 409，如需继续请重新提交）；`ESCALATED` 已转人工的单，追问只入线程供专员查看，AI 不再介入（返回 note 说明）；空消息 400；跨客户 reply/messages 一律 404。审计侧第 2 轮完整留痕：`authorizeSecurityGroup`（免审批）→ `:BASELINE`（ruleVersion=0）→ `:VERIFY`（观测到本次新规则版本 0→1）→ 异步质检 PASS。
+
+路由：`reply 接口(归属校验/CLOSED 409/ESCALATED 只记录) → 清旧 checkpoint → 对话历史注入 CONVERSATION_HISTORY → 图从头重跑 → 终稿/草稿落线程`。
+
 ### offline 模式做了什么
 
 - **ChatModel 桩**（`com.dolphin.ticket.offline.ScriptedChatModel`，`@Profile("offline") + @Primary`）：在最底层替换模型输出，按系统提示词特征识别分诊/诊断/问答/回复四类 Agent 调用并返回脚本化文本；真实的 ChatClient 流式 API、graph 编排、审批中断/resume、动作执行器管线全部原样走通。

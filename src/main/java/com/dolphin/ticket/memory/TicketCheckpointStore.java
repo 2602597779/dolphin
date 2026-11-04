@@ -1,5 +1,6 @@
 package com.dolphin.ticket.memory;
 
+import com.alibaba.cloud.ai.graph.RunnableConfig;
 import com.alibaba.cloud.ai.graph.checkpoint.BaseCheckpointSaver;
 import com.alibaba.cloud.ai.graph.checkpoint.config.SaverConfig;
 import com.alibaba.cloud.ai.graph.checkpoint.constant.SaverConstant;
@@ -35,5 +36,14 @@ public class TicketCheckpointStore {
     /** 暴露底层 saver,便于测试与运维诊断 */
     public BaseCheckpointSaver saver() {
         return saver;
+    }
+
+    /**
+     * 清除本工单的图 checkpoint(阶段4 reply 续跑用):
+     * 旧断点停留在上一轮的中断点(如 approval 前),带着它 invoke 会直接 resume 而非重新评估;
+     * reply 语义是"按最新上下文从头重跑",先清旧断点再 invoke。
+     */
+    public void clear(String ticketId) {
+        saver.clear(RunnableConfig.builder().threadId(ticketId).build());
     }
 }

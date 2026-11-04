@@ -25,6 +25,12 @@ public final class TicketState {
     /** 用户提交的原始工单文本 */
     public static final String RAW_MESSAGE = "rawMessage";
 
+    /**
+     * 对话历史转录(阶段4 多轮对话):"客户: …"/"客服: …" 逐行文本,
+     * reply 续跑时注入;首轮提交为空串。各 Agent 的 user 提示词均拼接此上下文。
+     */
+    public static final String CONVERSATION_HISTORY = "conversationHistory";
+
     /** 分诊分类结果,Map 结构:{product, type, urgency}(产品/类型/紧急度) */
     public static final String CLASSIFICATION = "classification";
 
@@ -63,9 +69,9 @@ public final class TicketState {
      */
     public static Map<String, KeyStrategy> keyStrategies() {
         Map<String, KeyStrategy> strategies = new HashMap<>();
-        for (String key : List.of(TICKET_ID, RAW_MESSAGE, CLASSIFICATION, DIAGNOSIS_REPORT,
-                SIMILAR_TICKETS, REPLY_DRAFT, PENDING_ACTION, PROPOSAL_INVALID, APPROVED,
-                EXECUTE_RESULT, EXECUTE_STATUS, FINAL_REPLY)) {
+        for (String key : List.of(TICKET_ID, RAW_MESSAGE, CONVERSATION_HISTORY, CLASSIFICATION,
+                DIAGNOSIS_REPORT, SIMILAR_TICKETS, REPLY_DRAFT, PENDING_ACTION, PROPOSAL_INVALID,
+                APPROVED, EXECUTE_RESULT, EXECUTE_STATUS, FINAL_REPLY)) {
             strategies.put(key, new ReplaceStrategy());
         }
         return strategies;

@@ -83,7 +83,7 @@ class AlertDiagnosisServiceTest {
         task.setProduct("模型推理服务");
         when(taskMatcher.match(any())).thenReturn(java.util.Optional.of(matched(task)));
         when(retriever.retrieve(anyString(), anyInt())).thenReturn(List.of("[来源:kb-1] 相关知识"));
-        when(diagnosisAgent.diagnose(anyString(), any(), anyString())).thenReturn(
+        when(diagnosisAgent.diagnose(anyString(), any(), anyString(), anyString())).thenReturn(
                 new DiagnosisAgent.DiagnosisOutcome("【故障摘要】推理服务 5xx。",
                         com.dolphin.ticket.action.ActionProposal.parse("restartInstance:i-abc123"), false));
         when(notifier.isConfigured()).thenReturn(true);
@@ -100,7 +100,8 @@ class AlertDiagnosisServiceTest {
 
         // 诊断上下文必须包含告警摘要与任务上下文;classification.product 来自任务配置
         Mockito.verify(diagnosisAgent).diagnose(
-                anyString(), eq(Map.of("product", "模型推理服务", "type", "故障", "urgency", "高")), anyString());
+                anyString(), eq(Map.of("product", "模型推理服务", "type", "故障", "urgency", "高")),
+                anyString(), eq(""));
         // 通知正文包含报告与人工决策标注
         Mockito.verify(notifier).sendMarkdown(anyString(), Mockito.contains("仅供人工决策"));
     }
@@ -111,7 +112,7 @@ class AlertDiagnosisServiceTest {
         task.setName("模型5xx高错误率");
         when(taskMatcher.match(any())).thenReturn(java.util.Optional.of(matched(task)));
         when(retriever.retrieve(anyString(), anyInt())).thenReturn(List.of());
-        when(diagnosisAgent.diagnose(anyString(), any(), anyString())).thenReturn(
+        when(diagnosisAgent.diagnose(anyString(), any(), anyString(), anyString())).thenReturn(
                 new DiagnosisAgent.DiagnosisOutcome("", null, true));
 
         assertTrue(service().schedule(alert("ModelHttp5xxRateHigh", "critical")));
@@ -126,7 +127,7 @@ class AlertDiagnosisServiceTest {
         task.setName("模型限流");
         when(taskMatcher.match(any())).thenReturn(java.util.Optional.of(matched(task)));
         when(retriever.retrieve(anyString(), anyInt())).thenReturn(List.of());
-        when(diagnosisAgent.diagnose(anyString(), any(), anyString())).thenReturn(
+        when(diagnosisAgent.diagnose(anyString(), any(), anyString(), anyString())).thenReturn(
                 new DiagnosisAgent.DiagnosisOutcome("【故障摘要】限流。", null, false));
         when(notifier.isConfigured()).thenReturn(true);
         when(notifier.sendMarkdown(anyString(), anyString())).thenReturn(false);

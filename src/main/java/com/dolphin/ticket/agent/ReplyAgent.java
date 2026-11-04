@@ -22,14 +22,18 @@ public class ReplyAgent {
     /**
      * 生成回复草稿。
      *
-     * @param rawMessage     用户原始工单文本
+     * @param rawMessage     用户原始工单文本(多轮场景为最新一条客户消息)
      * @param classification 分诊结果
      * @param content        诊断报告或知识答案等处理内容
+     * @param history        对话历史转录("客户: …"/"客服: …"),首轮为空串
      * @return 回复草稿文本
      */
-    public String compose(String rawMessage, Map<String, Object> classification, String content) {
+    public String compose(String rawMessage, Map<String, Object> classification, String content, String history) {
         String user = "客户工单原文:" + rawMessage
                 + "\n分诊结果:" + classification
+                + (history == null || history.isBlank()
+                        ? ""
+                        : "\n对话历史(客户此前沟通,回复需承接上下文、勿重复已答复内容):\n" + history)
                 + "\n内部处理内容:\n" + content;
         // TODO: 敏感信息脱敏(实例 ID/金额等按策略打码)
         return chatClient.prompt().user(user).call().content();

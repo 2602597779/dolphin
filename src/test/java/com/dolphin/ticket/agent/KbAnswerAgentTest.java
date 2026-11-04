@@ -19,7 +19,7 @@ class KbAnswerAgentTest {
         List<String> snippets = List.of(
                 "[来源:kb-slb-001] 健康检查不通过的常见原因之一:后端端口未监听。",
                 "[来源:kb-slb-002] 安全组未放行健康检查探测流量也会导致失败。");
-        String user = KbAnswerAgent.buildUserMessage("SLB 健康检查不通过?", Map.of("product", "SLB"), snippets);
+        String user = KbAnswerAgent.buildUserMessage("SLB 健康检查不通过?", Map.of("product", "SLB"), snippets, "");
         // 工单原文与产品名必须保留
         assertTrue(user.contains("工单原文:SLB 健康检查不通过?"));
         assertTrue(user.contains("涉及产品:SLB"));
@@ -32,16 +32,27 @@ class KbAnswerAgentTest {
 
     @Test
     void emptyRetrievalMarksNoRecallExplicitly() {
-        String user = KbAnswerAgent.buildUserMessage("怎么开发票?", Map.of("product", "计费"), List.of());
+        String user = KbAnswerAgent.buildUserMessage("怎么开发票?", Map.of("product", "计费"), List.of(), "");
         assertTrue(user.contains("(知识库暂无召回内容)"));
         assertTrue(user.contains("工单原文:怎么开发票?"));
     }
 
     @Test
     void nullRetrievalIsTolerated() {
-        String user = KbAnswerAgent.buildUserMessage("怎么开发票?", Map.of(), null);
+        String user = KbAnswerAgent.buildUserMessage("怎么开发票?", Map.of(), null, "");
         assertTrue(user.contains("(知识库暂无召回内容)"));
         // 产品缺失时回退为"未知"
         assertTrue(user.contains("涉及产品:未知"));
+    }
+
+    @Test
+    void conversationHistoryIsSplicedWhenPresent() {
+        // 阶段4 多轮对话:非空历史必须拼入 prompt,空历史不产生多余段落
+        String withHistory = KbAnswerAgent.buildUserMessage("那怎么排查?", Map.of("product", "SLB"),
+                List.of(), "客户: SLB 健康检查不通过?\n客服: 常见原因是后端端口未监听。");
+        assertTrue(withHistory.contains("对话历史"));
+        assertTrue(withHistory.contains("客户: SLB 健康检查不通过?"));
+        String withoutHistory = KbAnswerAgent.buildUserMessage("怎么开发票?", Map.of(), List.of(), "");
+        assertFalse(withoutHistory.contains("对话历史"));
     }
 }

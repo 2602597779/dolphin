@@ -74,15 +74,20 @@ public class DiagnosisAgent {
     /**
      * 诊断一条故障工单。
      *
-     * @param rawMessage     用户原始工单文本
+     * @param rawMessage     用户原始工单文本(多轮场景为最新一条客户消息)
      * @param classification 分诊结果 {product, type, urgency}
      * @param similarTickets 相似历史工单列表(可能为空,Agent 也可自行调用检索工具)
+     * @param history        对话历史转录("客户: …"/"客服: …"),首轮为空串
      * @return 诊断报告 + 结构化动作建议
      */
-    public DiagnosisOutcome diagnose(String rawMessage, Map<String, Object> classification, String similarTickets) {
+    public DiagnosisOutcome diagnose(String rawMessage, Map<String, Object> classification,
+                                     String similarTickets, String history) {
         String user = "工单原文:" + rawMessage
                 + "\n分诊结果:产品=" + classification.getOrDefault("product", "未知")
                 + ",紧急度=" + classification.getOrDefault("urgency", "低")
+                + (history == null || history.isBlank()
+                        ? ""
+                        : "\n对话历史(客户此前沟通,本轮诉求以此为基础重新评估):\n" + history)
                 + "\n已检索到的相似工单:\n" + (similarTickets == null || similarTickets.isBlank() ? "无" : similarTickets);
         // TODO: 多轮 ReAct 上限控制与工具调用审计聚合
         String content;

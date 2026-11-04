@@ -34,7 +34,16 @@ public class LeetcodeTest {
         int res5 = maxArea(height2);
         System.out.println(res5); // 1
 
+        // 测试三数之和
+        int[] nums5 = {-1, 0, 1, 2, -1, -4};
+        List<List<Integer>> res6 = threeSum(nums5);
+        System.out.println(res6); // [[-1,-1,2],[-1,0,1]]
 
+        int[] nums6 = {0, 1, 1};
+        System.out.println(threeSum(nums6)); // []
+
+        int[] nums7 = {0, 0, 0};
+        System.out.println(threeSum(nums7)); // [[0,0,0]]
     }
 
     /**
@@ -159,6 +168,51 @@ public class LeetcodeTest {
         }
 
         return maxWater;
+    }
+
+    /**
+     * 三数之和
+     * 给定一个整数数组 nums，找出所有和为 0 且不重复的三元组。
+     *
+     * 算法思路：排序 + 双指针
+     * - 先排序，固定第一个数 nums[i]，用左右指针在 i+1..n-1 中找两数之和等于 -nums[i]
+     * - 剪枝：nums[i] > 0 时后面不可能凑出 0，直接结束
+     * - 去重：i 跳过与前一个相同的值；找到一组解后 left/right 各自跳过重复值
+     *
+     * 时间复杂度：O(n²)（排序 O(nlogn) + 外层 n × 双指针 n）
+     * 空间复杂度：O(logn)（排序栈），不计结果列表
+     *
+     * 示例：[-1,0,1,2,-1,-4] → [[-1,-1,2],[-1,0,1]]
+     */
+    public static List<List<Integer>> threeSum(int[] nums) {
+        List<List<Integer>> result = new ArrayList<>();
+        Arrays.sort(nums);
+        int n = nums.length;
+
+        for (int i = 0; i < n - 2; i++) {
+            // 第一个数大于 0，后面全为正数，不可能凑出 0
+            if (nums[i] > 0) break;
+            // 跳过重复的第一个数，避免出现重复三元组
+            if (i > 0 && nums[i] == nums[i - 1]) continue;
+
+            int left = i + 1, right = n - 1;
+            while (left < right) {
+                int sum = nums[i] + nums[left] + nums[right];
+                if (sum == 0) {
+                    result.add(Arrays.asList(nums[i], nums[left], nums[right]));
+                    // 跳过 left/right 的重复值
+                    while (left < right && nums[left] == nums[left + 1]) left++;
+                    while (left < right && nums[right] == nums[right - 1]) right--;
+                    left++;
+                    right--;
+                } else if (sum < 0) {
+                    left++;  // 和偏小，移动左指针增大
+                } else {
+                    right--; // 和偏大，移动右指针减小
+                }
+            }
+        }
+        return result;
     }
 
 }
