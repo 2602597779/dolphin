@@ -49,14 +49,14 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 **业务目标**：上线效果可量化，面试能说出"自动化解决率 X%、MTTR Y 分钟"且数字来自系统本身。
 
 任务拆解：
-- [ ] T2.1 `MetricsService`：基于 `ticket` 表聚合——工单总量、自动化结单率（CLOSED 且未经人工池/审批）、人工升级率（进过 ESCALATED/human_task）、审批触发率、质检通过率（audit_log 的 quality-review 事件）
-- [ ] T2.2 `ticket` 表补 `created_at`/`closed_at`/`priority` 时间戳字段（为 MTTR/SLA 用）
-- [ ] T2.3 MTTR：CLOSED 工单的 closed_at - created_at 中位数/均值
-- [ ] T2.4 `GET /api/metrics/summary` 返回全部指标；`GET /api/metrics/tickets?from=&to=` 支持时间窗口
-- [ ] T2.5 单测：指标计算正确性（造数据断言数字）
-- [ ] T2.6 README 增加指标示例输出；commit（msg: "阶段2:运营指标API(MTTR/自动化解决率/升级率/质检通过率)"）
+- [x] T2.1 `MetricsService`：基于 `ticket` 表聚合——工单总量、自动化结单率（CLOSED 且未经人工池/审批）、人工升级率（进过 ESCALATED/human_task）、审批触发率、质检通过率（audit_log 的 quality-review 事件）——跨表判定用 JPQL 下推 SQL
+- [x] T2.2 `ticket` 表补 `created_at`/`closed_at`/`priority` 时间戳字段（为 MTTR/SLA 用）——`updateStatus` 结单落 `closed_at` 戳、重开清空、重复结单保持首戳；`priority` 默认 P3，老数据 null 聚合时按 P3 兜底
+- [x] T2.3 MTTR：CLOSED 工单的 closed_at - created_at 中位数/均值（缺结单时间戳的老数据不参与，样本数单列）
+- [x] T2.4 `GET /api/metrics/summary` 返回全部指标；`GET /api/metrics/tickets?from=&to=` 支持时间窗口（byStatus/byPriority/按日创建结单曲线/窗口内 MTTR；from 晚于 to 返回 422，非法时刻 400）
+- [x] T2.5 单测：指标计算正确性（造数据断言数字）——`MetricsServiceTest` 7 用例（全量口径/空库零除/质检驳回计入升级率/窗口过滤+按日序列/缺省全量/结单戳落戳清空/老数据不进 MTTR）
+- [x] T2.6 README 增加指标示例输出；commit（msg: "阶段2:运营指标API(MTTR/自动化解决率/升级率/质检通过率)"）——README 剧本 4 已写入真实运行输出（5 单：80% 自动化/20% 审批/质检 5/5/MTTR 均值 7.5s 中位 0.1s），可手工复核；代码由 commit `8557cc8` 入库，README+本文件以阶段 2 msg 补交
 
-**完成标准**：造 5 条工单数据后，指标接口的数字能用 README 剧本手工复核。
+**完成标准**：造 5 条工单数据后，指标接口的数字能用 README 剧本手工复核。✅ 已达成（3 咨询 + 1 安全组直执 + 1 重启审批，summary 每个数字与剧本一一对应）
 
 ### 阶段 3：SLA 优先级 + 超时升级（约 1~2 天）
 
@@ -88,16 +88,18 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 
 ## 当前断点（每次会话结束必须更新）
 
-**最后更新**：2026-11-03（第二次会话收尾）
-**已完成**：H0~H3；**阶段 1 全部完成**（客户/租户模型 + API-Key 鉴权 + 工单归属隔离 + 列表接口，`mvn test` 162 用例 0 失败，已 commit）
-**下一步**：阶段 2 运营指标 API，从 T2.1（`MetricsService`）开始
-**git 状态**：阶段 1 改动 + PLAN.md 勾选更新各自入库后，工作区应保持干净
+**最后更新**：2026-11-03（第三次会话收尾）
+**已完成**：H0~H3；**阶段 1 全部完成**（已 commit）；**阶段 2 全部完成**（运营指标 API：MetricsService/Controller + closed_at/priority 落库 + 7 用例 + README 剧本 4，`mvn test` 169 用例 0 失败，代码在 `8557cc8`、README/PLAN 以阶段 2 msg 补交）
+**下一步**：阶段 3 SLA 优先级 + 超时升级，从 T3.1（分诊输出 P1~P4 落 `ticket.priority`）开始
+**git 状态**：阶段 2 的 README + PLAN.md 勾选以阶段 2 msg 入库后，工作区应保持干净
 
 ### 已提交的进度凭证（git log 摘要）
 
 - `P0:状态全落库+并发串扰根治+离线演示链路`（H2 全部 P0 改造 + H0/H1/H3 清理顺带入库）
 - `docs: 新增企业化改造计划(PLAN.md)断点续传文档`（本文件）
 - `阶段1:客户/租户模型+API-Key鉴权+工单归属隔离`（customer 包 + ApiKeyAuthFilter + Ticket 归属/列表 + TenantIsolationTest 9 用例 + README 双客户剧本）
+- `fix：dolohin`（阶段 2 全部代码：metrics 包 + TicketEntity closed_at/priority + 指标聚合查询 + MetricsServiceTest，由用户手动提交）
+- `阶段2:运营指标API(MTTR/自动化解决率/升级率/质检通过率)`（README 剧本 4 真实输出 + 本文件勾选）
 
 ### 阶段 1 关键落点（面试话术/后续阶段引用）
 
@@ -105,6 +107,12 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 - 鉴权：`X-API-Key` 头 → `ApiKeyAuthFilter`（仅拦 `/api/tickets/**`）→ request attribute 注入 customerId；缺失/错误/已吊销统一 401 同文案
 - 隔离：`TicketService.getForCustomer/listForCustomer`；`ticket.customer_id=null` 表示内部渠道（告警自动开单/历史数据），内部直调全量可见
 - 审批接口 `/api/tickets/{id}/approve` 同样做归属校验（他客户的单 404，不能代审）
+
+### 阶段 2 关键落点（面试话术/后续阶段引用）
+
+- 口径（README 剧本 4 与代码 javadoc 一致）：自动化结单率=CLOSED 且无人工池/审批 ÷ 总量；人工升级率=ESCALATED 或进过人工池 ÷ 总量；审批触发率=待审批或已有决策 ÷ 总量；质检通过率=PASS ÷ (PASS+REJECTED)（契约无效不计分母）；MTTR=结单戳-创建时间均值/中位数
+- `ticket.closed_at`：`updateStatus` 结单落戳、重开清空、重复结单保持首戳；`priority` 默认 P3（阶段 3 接入分诊产出）
+- `MetricsServiceTest`（@DataJpaTest）7 用例；端到端真实运行：5 单 → 80% 自动化/20% 审批/0% 升级/质检 5/5/MTTR 均值 7.5s 中位 0.1s，数字可手工复核
 
 ### 会话恢复指引（新会话照此操作）
 

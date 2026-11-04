@@ -187,6 +187,66 @@ curl.exe -s -X POST http://localhost:8080/api/tickets/submit -H "X-API-Key: ak-d
 
 路由：`triage(故障) → diagnosis(报告含"安全组") → reply → 免审批动作 → execute → followup 结单`。
 
+### 剧本 4：运营指标——上线效果可量化
+
+运营指标 API 从工单台账/审批决策/人工池/审计日志聚合（运营侧接口，不走客户鉴权）：
+
+```bash
+GET /api/metrics/summary                 # 全量汇总
+GET /api/metrics/tickets?from=&to=       # 时间窗口报表(from/to 为 ISO-8601,缺省为全量)
+```
+
+口径：**自动化结单率** = CLOSED 且无人工池/审批介入 ÷ 总量；**人工升级率** = ESCALATED 或进过人工池 ÷ 总量；**审批触发率** = 待审批或已有决策 ÷ 总量；**质检通过率** = PASS ÷ (PASS+REJECTED)，契约无效不计分母；**MTTR** = 结单时间戳 - 创建时间的均值/中位数（质检驳回重开会清空结单时间、再次结单重新计时）。
+
+复现：全新数据目录起服，以客户A 的 Key 提交 5 条工单——3 条咨询（自动结单）、1 条安全组 443（免审批直执结单）、1 条重启（审批通过后结单，approve 比提交晚了约半分钟，拉高了均值 MTTR）：
+
+```bash
+curl.exe -s http://localhost:8080/api/metrics/summary
+```
+
+```json
+{
+    "generatedAt":  "2026-11-03T09:28:46.832232Z",
+    "totalTickets":  5,
+    "byStatus":  { "CLOSED":  5 },
+    "closedTickets":  5,
+    "automatedClosedTickets":  4,
+    "automationRatePct":  80.0,
+    "humanEscalatedTickets":  0,
+    "escalationRatePct":  0.0,
+    "approvalTickets":  1,
+    "approvalRatePct":  20.0,
+    "quality":  {
+                    "reviewed":  5, "passed":  5, "rejected":  0,
+                    "contractInvalid":  0, "passRatePct":  100.0
+                },
+    "mttr":  { "sampleSize":  5, "meanSeconds":  7.5, "medianSeconds":  0.1 }
+}
+```
+
+手工复核：5 单全部结单；4 单全程无人介入（3 咨询 + 1 免审批直执）→ 自动化 4/5=80%；仅重启单走审批 → 20%；无转人工 → 0%；5 次异步质检全 PASS；MTTR 中位数 0.1s（自动闭环即时结单），均值被审批等待时间拉高到 7.5s。
+
+```bash
+curl.exe -s "http://localhost:8080/api/metrics/tickets?from=2026-11-03T00:00:00Z"
+```
+
+```json
+{
+    "from":  "2026-11-03T00:00:00Z",
+    "to":  "2026-11-03T09:29:52.324983700Z",
+    "createdTickets":  5,
+    "byStatus":  { "CLOSED":  5 },
+    "byPriority":  { "P3":  5 },
+    "daily":  [ { "date":  "2026-11-03", "created":  5, "closed":  5 } ],
+    "closedTickets":  5,
+    "mttr":  { "sampleSize":  5, "meanSeconds":  7.5, "medianSeconds":  0.1 }
+}
+```
+
+（`byPriority` 暂全为默认 P3，分诊产出 P1~P4 优先级由阶段 3 SLA 改造接入；非法时间参数返回 400。）
+
+路由：`GET /api/metrics/** → MetricsService 聚合（JPQL 下推 count/group by + 审计事件分类）`。
+
 ### offline 模式做了什么
 
 - **ChatModel 桩**（`com.dolphin.ticket.offline.ScriptedChatModel`，`@Profile("offline") + @Primary`）：在最底层替换模型输出，按系统提示词特征识别分诊/诊断/问答/回复四类 Agent 调用并返回脚本化文本；真实的 ChatClient 流式 API、graph 编排、审批中断/resume、动作执行器管线全部原样走通。
