@@ -513,3 +513,70 @@ POST /api/human-tickets/{ticketId}/resolve  # 完结 {"note":"已恢复"} → RE
 ```
 
 非法状态迁移（未认领直接完结、重复认领）返回 409；任务不存在返回 404。人工任务已落库（表 `human_task`，P0），重启不丢；TODO: 与真实人工系统对接。
+
+## 全链路导览（P1 全链路可见化）
+
+任意一单都可用 `GET /api/tickets/{id}/timeline` 回放完整链路：节点轨迹、执行器基线/验证、审批决策、质检留痕统一按 `audit_log.id` 升序还原（`at` 仅展示——同毫秒事件会并列）。
+
+### 节点表
+
+| 节点 | 实现 | 职责 | 时间线 action |
+|---|---|---|---|
+| triage | `TriageAgent` + `SlaPriorityRules` | 分类 + SLA 优先级落库 | `graph:triage:enter/exit` |
+| diagnosis | `DiagnosisAgent` + `TicketRetriever` | 诊断报告 + PROPOSAL 动作建议 | `graph:diagnosis:*` |
+| kbAnswer | `KbAnswerAgent` | 知识问答（RAG 片段注入） | `graph:kbAnswer:*` |
+| reply | `ReplyAgent` | 客户可见终稿 | `graph:reply:*` |
+| approval | `ApprovalService`（interruptBefore） | 审批决策读取 + 一次性令牌签发 | `graph:approval:*` |
+| execute | `ActionExecutor` | 白名单→令牌门禁→幂等→提交→基线/验证 | `graph:execute:*`、`<action>:BASELINE`、`<action>:VERIFY` |
+| followup | 结单 + 向量回流 + 异步质检 | 终稿落库、经验回流、`quality-review` | `graph:followup:*` |
+| escalateHuman | `HumanTicketPool` | 转人工落队（验证失败/被拒/建议不可信/高危） | `graph:escalateHuman:*`、`human-pool` |
+
+节点轨迹由 `TicketGraphConfig#traced` 统一包装：enter 记输入摘要、exit 记输出摘要 + `cost=<ms>`、异常记 error 后原样重抛；detail 超 200 字符截断，不打印令牌/密钥。
+
+### 时间线 API
+
+```bash
+TID=T...   # submit 返回的工单号
+curl -s -H "X-API-Key: ak-demo-cust-001" http://localhost:8080/api/tickets/$TID/timeline
+```
+
+```json
+{
+  "ticketId": "T...",
+  "ticket": {"status": "CLOSED", "rawMessage": "...", "createdAt": "...", "updatedAt": "..."},
+  "decisions": [{"approved": true, "approver": "demo-ops", "reason": "...", "decidedAt": "..."}],
+  "events": [
+    {"id": 1, "at": "...", "phase": "node", "action": "graph:triage:enter", "summary": "raw=..."},
+    {"id": 2, "at": "...", "phase": "node", "action": "graph:triage:exit", "summary": "type=故障 priority=P1 cost=45ms"},
+    {"id": 3, "at": "...", "phase": "verify", "action": "restartInstance:BASELINE", "summary": "..."},
+    {"id": 4, "at": "...", "phase": "quality", "action": "quality-review", "summary": "PASS opinion=..."}
+  ],
+  "nodePath": ["triage", "diagnosis", "reply", "approval", "execute", "followup"]
+}
+```
+
+- `phase` 推导：`graph:` → `node`；含 `:BASELINE`/`:VERIFY` → `verify`；`intent-route` → `router`；`quality-review` → `quality`；其余 → `action`。
+- `nodePath` 由 `graph:*:enter` 去重推导；审计为空也返回 200 + 空 events，仅工单不存在返回 404。
+- 零 schema 变更：全部复用 `audit_log` / `approval_decision` / `ticket` 既有表，不分页（单工单量级几十行）。
+
+### 演示剧本
+
+`demo/walkthrough.sh` 六幕：咨询单、故障单审批闭环、拒绝单、免审批直执、人工池认领完结、告警链路。每幕头注释标注「链路环节 → 代码入口(file:line) → 预期响应」。offline profile 下零外部依赖：
+
+```bash
+mvn spring-boot:run -Dspring-boot.run.profiles=offline
+bash demo/walkthrough.sh        # 可选 BASE_URL / API_KEY 环境变量
+```
+
+> offline 桩分诊只产出 故障/咨询，无法复现「高危/超范围」直达转人工；真实模型下该分支同样以 `nodePath` 终点 `escalateHuman` 呈现，剧本第四幕以「免审批直执」覆盖 autoExecute 分支。
+
+### 跟着链路读代码
+
+1. 入口与受理：`TicketController.submit`/`reply`/`approve` → `TicketGraphRunner`
+2. 图定义与节点：`TicketGraphConfig#ticketStateGraph`（节点 94-231，条件边 232-285）
+3. 轨迹包装：`TicketGraphConfig#traced`（enter/exit/error + cost，200 字截断）
+4. 执行与验证：`ActionExecutor`（基线采样 110 / 验证 134）
+5. 审批决策与令牌：`ApprovalService` + `ApprovalTokenService`
+6. 时间线 API：`TicketTimelineController#timeline`
+7. 转人工：`HumanTicketPool` + `HumanTicketController`
+8. 结单质检：`QualityReviewService`

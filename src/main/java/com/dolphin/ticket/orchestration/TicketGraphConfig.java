@@ -2,6 +2,7 @@ package com.dolphin.ticket.orchestration;
 
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.StateGraph;
+import com.alibaba.cloud.ai.graph.action.NodeAction;
 import com.alibaba.cloud.ai.graph.exception.GraphStateException;
 import com.dolphin.ticket.agent.DiagnosisAgent;
 import com.dolphin.ticket.agent.KbAnswerAgent;
@@ -10,6 +11,7 @@ import com.dolphin.ticket.agent.TriageAgent;
 import com.dolphin.ticket.action.ActionExecutor;
 import com.dolphin.ticket.action.ActionProposal;
 import com.dolphin.ticket.action.ActionRegistry;
+import com.dolphin.ticket.infra.audit.AuditLogger;
 import com.dolphin.ticket.rag.DocIngestService;
 import com.dolphin.ticket.rag.TicketRetriever;
 import com.dolphin.ticket.service.ApprovalService;
@@ -77,7 +79,8 @@ public class TicketGraphConfig {
                                        ActionRegistry actionRegistry,
                                        ActionExecutor actionExecutor,
                                        DocIngestService docIngestService,
-                                       com.dolphin.ticket.service.HumanTicketPool humanTicketPool) throws GraphStateException {
+                                       com.dolphin.ticket.service.HumanTicketPool humanTicketPool,
+                                       AuditLogger auditLogger) throws GraphStateException {
 
         // 状态工厂:注册所有共享 key 的合并策略;序列化器改用 Jackson(默认 Gson 不在 classpath)
         StateGraph graph = new StateGraph(() -> {
@@ -87,7 +90,7 @@ public class TicketGraphConfig {
         }, new TicketStateSerializer());
 
         // ---- 分诊:原始文本 → 分类结果 + SLA 优先级 ----
-        graph.addNode(NODE_TRIAGE, node_async(state -> {
+        graph.addNode(NODE_TRIAGE, node_async(traced(NODE_TRIAGE, auditLogger, approvalService, state -> {
             String raw = TicketState.str(state, TicketState.RAW_MESSAGE, "");
             String ticketId = TicketState.str(state, TicketState.TICKET_ID, "");
             Map<String, Object> classification = triageAgent.classify(raw);
@@ -99,10 +102,10 @@ public class TicketGraphConfig {
             ticketService.updatePriority(ticketId, priority);
             log.debug("[graph] triage 结果: {} priority={}", classification, priority);
             return Map.of(TicketState.CLASSIFICATION, classification);
-        }));
+        })));
 
         // ---- 故障诊断:挂只读工具产出报告 + 结构化动作建议(PROPOSAL 契约行) ----
-        graph.addNode(NODE_DIAGNOSIS, node_async(state -> {
+        graph.addNode(NODE_DIAGNOSIS, node_async(traced(NODE_DIAGNOSIS, auditLogger, approvalService, state -> {
             String raw = TicketState.str(state, TicketState.RAW_MESSAGE, "");
             Map<String, Object> classification = TicketState.map(state, TicketState.CLASSIFICATION);
             List<String> similar = ticketRetriever.retrieve(retrievalQuery(state, raw), 3);
@@ -117,10 +120,10 @@ public class TicketGraphConfig {
             // 建议不可信(契约缺失/格式非法/低置信度)时置位,回复后路由直接收敛到转人工
             out.put(TicketState.PROPOSAL_INVALID, outcome.proposalInvalid());
             return out;
-        }));
+        })));
 
         // ---- 知识问答:咨询类工单直接生成答案 ----
-        graph.addNode(NODE_KB_ANSWER, node_async(state -> {
+        graph.addNode(NODE_KB_ANSWER, node_async(traced(NODE_KB_ANSWER, auditLogger, approvalService, state -> {
             String raw = TicketState.str(state, TicketState.RAW_MESSAGE, "");
             Map<String, Object> classification = TicketState.map(state, TicketState.CLASSIFICATION);
             List<String> similar = ticketRetriever.retrieve(retrievalQuery(state, raw), 3);
@@ -130,10 +133,10 @@ public class TicketGraphConfig {
             out.put(TicketState.REPLY_DRAFT, answer == null ? "" : answer);
             out.put(TicketState.SIMILAR_TICKETS, similar);
             return out;
-        }));
+        })));
 
         // ---- 回复撰写:把诊断报告/知识答案润色为客户可见终稿 ----
-        graph.addNode(NODE_REPLY, node_async(state -> {
+        graph.addNode(NODE_REPLY, node_async(traced(NODE_REPLY, auditLogger, approvalService, state -> {
             String raw = TicketState.str(state, TicketState.RAW_MESSAGE, "");
             Map<String, Object> classification = TicketState.map(state, TicketState.CLASSIFICATION);
             String diagnosisReport = TicketState.str(state, TicketState.DIAGNOSIS_REPORT, "");
@@ -143,10 +146,10 @@ public class TicketGraphConfig {
             String draft = replyAgent.compose(raw, classification, content,
                     TicketState.str(state, TicketState.CONVERSATION_HISTORY, ""));
             return Map.of(TicketState.REPLY_DRAFT, draft == null ? "" : draft);
-        }));
+        })));
 
         // ---- 人工审批:interruptBefore 在此节点前中断;恢复后从 ApprovalService 读决策 ----
-        graph.addNode(NODE_APPROVAL, node_async(state -> {
+        graph.addNode(NODE_APPROVAL, node_async(traced(NODE_APPROVAL, auditLogger, approvalService, state -> {
             String ticketId = TicketState.str(state, TicketState.TICKET_ID, "");
             // 探针发现:此节点看不到 HumanFeedback/checkpoint 写入的 approved,故决策走 ApprovalService
             boolean approved = approvalService.isApproved(ticketId);
@@ -160,10 +163,10 @@ public class TicketGraphConfig {
             }
             log.debug("[graph] approval 读取决策 ticketId={} approved={}", ticketId, approved);
             return Map.of(TicketState.APPROVED, approved);
-        }));
+        })));
 
         // ---- 执行:动作执行器统一管线(白名单→审批令牌门禁→幂等→提交→真实验证) ----
-        graph.addNode(NODE_EXECUTE, node_async(state -> {
+        graph.addNode(NODE_EXECUTE, node_async(traced(NODE_EXECUTE, auditLogger, approvalService, state -> {
             String ticketId = TicketState.str(state, TicketState.TICKET_ID, "");
             ActionProposal proposal = ActionProposal.parse(TicketState.str(state, TicketState.PENDING_ACTION, ""));
             // 从 ApprovalService 取本工单令牌传入(免审批动作无令牌,传 null 即可)
@@ -177,10 +180,10 @@ public class TicketGraphConfig {
                     // 终态供条件边分流:VERIFY_FAILED/REJECTED → 转人工,其余 → 结单
                     TicketState.EXECUTE_STATUS,
                     execResult == null ? ActionExecutor.Status.SUCCESS.name() : execResult.status().name());
-        }));
+        })));
 
         // ---- 结单:汇总最终回复;终态意图写图状态,由异步执行器与终稿原子落库 ----
-        graph.addNode(NODE_FOLLOWUP, node_async(state -> {
+        graph.addNode(NODE_FOLLOWUP, node_async(traced(NODE_FOLLOWUP, auditLogger, approvalService, state -> {
             String ticketId = TicketState.str(state, TicketState.TICKET_ID, "");
             String draft = TicketState.str(state, TicketState.REPLY_DRAFT, "");
             String executeResult = TicketState.str(state, TicketState.EXECUTE_RESULT, "");
@@ -200,10 +203,10 @@ public class TicketGraphConfig {
             return Map.of(
                     TicketState.FINAL_REPLY, finalReply,
                     TicketState.FINAL_STATUS, TicketService.STATUS_CLOSED);
-        }));
+        })));
 
         // ---- 转人工:高危/超范围工单直接升级;写操作验证失败/被拒时携带执行详情升级 ----
-        graph.addNode(NODE_ESCALATE, node_async(state -> {
+        graph.addNode(NODE_ESCALATE, node_async(traced(NODE_ESCALATE, auditLogger, approvalService, state -> {
             String ticketId = TicketState.str(state, TicketState.TICKET_ID, "");
             ticketService.updateStatus(ticketId, TicketService.STATUS_ESCALATED);
             String executeResult = TicketState.str(state, TicketState.EXECUTE_RESULT, "");
@@ -224,7 +227,7 @@ public class TicketGraphConfig {
                     .formatted(ticketId, reason))
                     + (executeResult.isBlank() ? "" : "执行与验证详情:" + executeResult);
             return Map.of(TicketState.FINAL_REPLY, finalReply);
-        }));
+        })));
 
         // ---- 边 ----
         graph.addEdge(StateGraph.START, NODE_TRIAGE);
@@ -300,5 +303,110 @@ public class TicketGraphConfig {
             return raw;
         }
         return ConversationService.tail(history, RETRIEVAL_HISTORY_CHARS) + "\n" + raw;
+    }
+
+    // ---- 全链路可见化(P1):节点轨迹审计 ----
+
+    /** 审计 detail 上限:超长截断,避免整段诊断报告/终稿灌进审计表 */
+    private static final int AUDIT_DETAIL_MAX_CHARS = 200;
+
+    /**
+     * 节点轨迹包装:统一记录 {@code graph:<node>:enter|exit|error} 三条审计,不改节点业务逻辑。
+     *
+     * <p>enter 记输入摘要,exit 记输出摘要 + cost(ms),异常记 error 后原样重抛(不吞异常,
+     * 不改变流程语义)。时间线 API 按 audit_log 的 id 升序还原发生顺序,nodePath 由 enter 轨迹去重推导。
+     */
+    private static NodeAction traced(String node, AuditLogger auditLogger,
+                                     ApprovalService approvalService, NodeAction fn) {
+        return state -> {
+            String ticketId = TicketState.str(state, TicketState.TICKET_ID, "");
+            long startNanos = System.nanoTime();
+            auditLogger.log(ticketId, "graph:" + node + ":enter",
+                    truncate(enterDetail(node, state, approvalService)));
+            Map<String, Object> out;
+            try {
+                out = fn.apply(state);
+            } catch (Exception e) {
+                auditLogger.log(ticketId, "graph:" + node + ":error", truncate(e.toString()));
+                throw e;
+            }
+            long costMs = (System.nanoTime() - startNanos) / 1_000_000;
+            auditLogger.log(ticketId, "graph:" + node + ":exit",
+                    truncate(exitDetail(node, out) + " cost=" + costMs + "ms"));
+            return out;
+        };
+    }
+
+    /** 各节点 enter 摘要:只取判定链路走向所需的关键输入,严禁敏感信息 */
+    private static String enterDetail(String node, OverAllState state, ApprovalService approvalService) {
+        String ticketId = TicketState.str(state, TicketState.TICKET_ID, "");
+        ActionProposal proposal = ActionProposal.parse(TicketState.str(state, TicketState.PENDING_ACTION, ""));
+        return switch (node) {
+            case NODE_TRIAGE -> "raw=" + head(TicketState.str(state, TicketState.RAW_MESSAGE, ""), 80);
+            case NODE_DIAGNOSIS, NODE_KB_ANSWER -> "type=" + classificationValue(state, "type")
+                    + " product=" + classificationValue(state, "product");
+            case NODE_REPLY -> "proposal=" + (proposal == null ? "无" : proposal.action());
+            case NODE_APPROVAL -> "decision=" + (approvalService.hasDecision(ticketId) ? "已记录" : "未记录");
+            case NODE_EXECUTE -> "action=" + (proposal == null ? "无" : proposal.action());
+            case NODE_FOLLOWUP -> "executeStatus=" + TicketState.str(state, TicketState.EXECUTE_STATUS, "无");
+            case NODE_ESCALATE -> "type=" + classificationValue(state, "type")
+                    + " executeStatus=" + TicketState.str(state, TicketState.EXECUTE_STATUS, "无");
+            default -> "";
+        };
+    }
+
+    /** 各节点 exit 摘要:关键输出键(长度类只记字符数,不落全文) */
+    private static String exitDetail(String node, Map<String, Object> out) {
+        return switch (node) {
+            case NODE_TRIAGE -> "type=" + asMap(out.get(TicketState.CLASSIFICATION)).getOrDefault("type", "")
+                    + " priority=" + asMap(out.get(TicketState.CLASSIFICATION)).getOrDefault("priority", "");
+            case NODE_DIAGNOSIS -> "proposal=" + proposalName(out)
+                    + " invalid=" + strOf(out, TicketState.PROPOSAL_INVALID)
+                    + " reportChars=" + lengthOf(out, TicketState.DIAGNOSIS_REPORT);
+            case NODE_KB_ANSWER -> "answerChars=" + lengthOf(out, TicketState.REPLY_DRAFT);
+            case NODE_REPLY -> "draftChars=" + lengthOf(out, TicketState.REPLY_DRAFT);
+            case NODE_APPROVAL -> "approved=" + strOf(out, TicketState.APPROVED);
+            case NODE_EXECUTE -> "executeStatus=" + strOf(out, TicketState.EXECUTE_STATUS);
+            case NODE_FOLLOWUP -> "finalStatus=" + strOf(out, TicketState.FINAL_STATUS)
+                    + " replyChars=" + lengthOf(out, TicketState.FINAL_REPLY);
+            case NODE_ESCALATE -> "escalated replyChars=" + lengthOf(out, TicketState.FINAL_REPLY);
+            default -> "";
+        };
+    }
+
+    private static String classificationValue(OverAllState state, String field) {
+        return String.valueOf(TicketState.map(state, TicketState.CLASSIFICATION).getOrDefault(field, ""));
+    }
+
+    private static String proposalName(Map<String, Object> out) {
+        ActionProposal proposal = ActionProposal.parse(strOf(out, TicketState.PENDING_ACTION));
+        return proposal == null ? "无" : proposal.action();
+    }
+
+    private static String strOf(Map<String, Object> out, String key) {
+        Object value = out.get(key);
+        return value == null ? "未知" : String.valueOf(value);
+    }
+
+    private static int lengthOf(Map<String, Object> out, String key) {
+        Object value = out.get(key);
+        return value == null ? 0 : String.valueOf(value).length();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> asMap(Object value) {
+        return value instanceof Map ? (Map<String, Object>) value : Map.of();
+    }
+
+    /** 取前 N 字(用于原始文本摘要) */
+    private static String head(String text, int chars) {
+        return text.length() <= chars ? text : text.substring(0, chars) + "…";
+    }
+
+    /** detail 统一截断:超 200 字符加省略号 */
+    private static String truncate(String detail) {
+        return detail.length() <= AUDIT_DETAIL_MAX_CHARS
+                ? detail
+                : detail.substring(0, AUDIT_DETAIL_MAX_CHARS) + "…";
     }
 }
