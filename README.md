@@ -473,7 +473,18 @@ DOLPHIN_DB_PASSWORD=*** \
 java -jar dolphin.jar --spring.profiles.active=mysql
 ```
 
-schema 仍由 Hibernate `ddl-auto: update` 管理，生产建议后续切换 Flyway 管 schema。
+schema 管理已切 Flyway（见下节）；mysql profile 因基线为 H2 方言，暂由 `ddl-auto: update` 建表。
+
+## Schema 管理（Flyway 版本化迁移 + CI）
+
+演示期 `ddl-auto: update` 够用，但它本质是"每次启动静默改表"——改了什么、线上本地是否一致、能否回滚，全都不可审计。现在 schema 交给 Flyway 版本化迁移，Hibernate 退为 `validate` 只读校验，漂移即启动失败（可控失败优于静默漂移）。
+
+- **V1 基线**（`src/main/resources/db/migration/V1__baseline.sql`）：11 张表全量 DDL。没有手写类型映射，而是从真实 H2 库 `SCRIPT NODATA` 导出后仅规范化约束名——`validate` 会逐列比对（`Instant → timestamp(6) with time zone`、`@Lob → clob`），手写映射必然漂移，导出保证与 Hibernate 6 映射严格一致。
+- **存量库兼容**：`baseline-on-migrate: true` + `baseline-version: 1`——`./data` 旧文件库（ddl-auto 时代建表、无迁移历史）首次启动自动打基线跳过 V1；全新库（测试/新环境）正常执行 V1。空库迁移、完整上下文、存量库 baseline 三条路径均已测试验证。
+- **增量变更**：实体加字段 → 新增 `V2__xxx.sql` → 启动自动迁移并校验。
+- **MySQL profile 暂不启用**：V1 为 H2 方言，真接 MySQL 时另立迁移系列；此前 mysql profile 保持 `ddl-auto: update` + `flyway.enabled: false`。
+
+CI（`.github/workflows/ci.yml`）：push / PR 到 main 自动跑全量 `mvn test`（temurin 21 + Maven 缓存）。测试全部离线自洽（H2 内存库 + dummy key），CI 无需配置任何密钥。
 
 ## P1 功能补全（告警闭环 / RAG 拼接 / 异步质检 / 人工池）
 

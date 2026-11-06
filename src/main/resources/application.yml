@@ -12,9 +12,15 @@ spring:
     password: ""
   jpa:
     hibernate:
-      # 骨架期由 Hibernate 建表;生产建议切换 Flyway 管理 schema
-      ddl-auto: update
+      # Schema 由 Flyway 版本化迁移管理(db/migration),启动只校验实体与表结构一致;
+      # 漂移即启动失败(可控),杜绝 update 模式的静默变更与不可审计
+      ddl-auto: validate
     open-in-view: false
+  flyway:
+    # 存量 ./data H2 文件库为 ddl-auto 时代建表(无迁移历史):首次启动自动打基线,
+    # 视同已到 V1,此后增量变更一律走 V2+;全新库(测试/新环境)则正常执行 V1
+    baseline-on-migrate: true
+    baseline-version: 1
   ai:
     openai:
       # 百炼 Coding Plan 专用 OpenAI 兼容端点(base-url 不带 /v1,Spring AI 会自动拼接)
@@ -135,3 +141,9 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     username: ${DOLPHIN_DB_USER:root}
     password: ${DOLPHIN_DB_PASSWORD:}
+  jpa:
+    hibernate:
+      # V1 基线为 H2 方言;真接 MySQL 时另立迁移系列(或按 vendor 目录拆分),此前先由 Hibernate 建表
+      ddl-auto: update
+  flyway:
+    enabled: false
