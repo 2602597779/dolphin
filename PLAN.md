@@ -77,8 +77,8 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 - [x] 阶段 4：工单多轮对话 `POST /api/tickets/{id}/reply`（对话历史进图状态，PENDING 单基于上下文续跑）——业务真实感最大单点
 - [ ] 阶段 5：钉钉卡片审批（审批人在钉钉点通过 → webhook 回调 resume），可截图讲的落地场景
 - [ ] 阶段 6：运营看板简单页面（消费指标 API）
-- [ ] 阶段 7：GitHub Actions CI（mvn test）
-- [ ] 阶段 8：Flyway 管 schema（替换 ddl-auto: update）
+- [x] 阶段 7：GitHub Actions CI（mvn test）——`.github/workflows/ci.yml`（push/PR 到 main，temurin 21 + Maven 缓存，测试离线自洽零密钥）。2026-11-06 真实验证：push `885279c` → Actions run 42183646528 全绿（https://github.com/2602597779/dolphin/actions/runs/42183646528）
+- [x] 阶段 8：Flyway 管 schema（替换 ddl-auto: update）——`flyway-core` + `V1__baseline.sql`（11 表全量 DDL，自真实 H2 库 `SCRIPT NODATA` 导出、约束名规范化，保证与 Hibernate 6 映射零漂移）+ `ddl-auto: validate` + `baseline-on-migrate: 1`（存量 ./data 库自动打基线，新库正常执行 V1）+ mysql profile 暂停用（`flyway.enabled: false` + `ddl-auto: update`，H2 方言基线不跨库）。2026-11-06 三条路径真实验证：①空库迁移 `mvn test` 225 用例全绿（每个测试上下文空库执行 V1+validate）②存量库 baseline 全程亲测（pre-baseline 11 表库 → 启动自动打 baseline version=1 跳过 V1 → validate 通过 → 老工单/客户数据完好）③基线后幂等启动（Schema up to date. No migration necessary）
 
 ### 阶段 4：工单多轮对话（约 1~2 天）
 
@@ -147,10 +147,10 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 
 ## 当前断点（每次会话结束必须更新）
 
-**最后更新**：2026-11-04（第七次会话：阶段 4.2 O8 异步化落地）
-**已完成**：H0~H3；**阶段 1~3 全部完成**（均已 commit）；**阶段 4 全部完成**（commit `f63a28c`）；**阶段 4.1 O1~O7 全部完成**（commit `c945eb8`：并发串行化、人工完结答复入线程、审批作废审计、短事务 + 失败补偿、转录逐行截断、检索带上文、入口幂等）；**阶段 4.2 O8 异步化全部完成**（受理即 202 + 受理闸门 `tryTransition` 替代单机锁 + `TicketGraphRunner` 异步执行/失败补偿 + 轮询 `/status` + SSE `/events` + 异步质检接线；`mvn test` 225 用例 0 失败 = 原 207 + 新增 18）
-**下一步**：可停手；若继续，从**阶段 5 钉钉卡片审批**（webhook 回调 resume）开始
-**git 状态**：阶段 4.2 全部改动（`TicketAsyncConfig`/`TicketAsyncProperties`/`TicketGraphRunner`/`TicketStatusService`/`TicketEventPublisher` 五个新类 + `TicketLockRegistry` 删除 + Controller 受理即 202 改造 + SlaMonitor PROCESSING 口径 + TicketFlowHandler 消费终态意图 + 3 个新测试类 + 4 个测试类适配 + 本文件）已本地 commit `b2e9e7f`（**仅本地未推远程**）；工作区干净
+**最后更新**：2026-11-06（第八次会话：Flyway + CI 三条路径验证闭环）
+**已完成**：H0~H3；**阶段 1~3 全部完成**（均已 commit）；**阶段 4 全部完成**（commit `f63a28c`）；**阶段 4.1 O1~O7 全部完成**（commit `c945eb8`）；**阶段 4.2 O8 异步化全部完成**（commit `b2e9e7f`）；**P1 全链路可见化完成**（commit `03cff20`：8 节点 traced 审计 + timeline API + 六幕演示剧本）；**阶段 7 CI + 阶段 8 Flyway 完成**（commit `885279c`：CI run 42183646528 全绿 + 空库迁移/存量库 baseline/幂等启动三路径亲测，详见第二梯队条目）
+**下一步**：可停手；若继续，从**阶段 5 钉钉卡片审批**（webhook 回调 resume）或**阶段 6 运营看板**开始
+**git 状态**：`885279c` 已推送 origin/main（快进 c2d8e98→885279c，含 P1 `03cff20`），GitHub Actions CI 全绿（run 42183646528，head_sha 与本地一致）；工作区仅剩 `LeetcodeTest.java`（用户刷题改动，不入库）；本地分支名 master、远程分支名 main，后续推送统一用 `git push origin master:main`
 
 ### 已提交的进度凭证（git log 摘要）
 
@@ -162,6 +162,9 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 - `阶段3:SLA优先级+超时自动升级人工池`（sla 包 4 类 + triage 分级落库 + sla_breach_at 留痕 + 指标 API 扩展 + 12 用例 + README 剧本 5）
 - `阶段4:工单多轮对话(对话历史进图状态+PENDING单上下文续跑)`（ticket_message 三件套 + reply/messages 接口 + Agent history 注入 + 12 用例 + README 剧本 6）
 - `阶段4优化:并发保护+人工回复入线程+审批作废留痕+短事务补偿`（阶段 4.1 O1~O7：TicketLockRegistry 串行锁 + TicketRoundService 短事务 + requestId 幂等 + `approval-invalidated`/`reply-failed` 审计 + 逐行截断转录 + 检索带上文 + 人工完结回线程 + 14 新用例 + README 剧本 6 加固段）
+- `阶段4.2:O8异步化(受理即202+轮询/SSE,受理闸门替代单机锁)`（TicketAsyncConfig/TicketAsyncProperties/TicketGraphRunner/TicketStatusService/TicketEventPublisher + tryTransition 受理闸门 + 18 新用例）
+- `P1:全链路可见化(8节点traced审计+timeline API+六幕演示剧本)`（commit `03cff20`，与 CI 提交一同首次推远程）
+- `阶段7+8:GitHub Actions CI(mvn test)+Flyway版本化schema(V1基线替换ddl-auto: update+validate+存量库baseline)`（commit `885279c` 已推 origin/main，Actions run 42183646528 全绿；三条迁移路径真实验证见第二梯队条目）
 
 ### 阶段 1 关键落点（面试话术/后续阶段引用）
 
