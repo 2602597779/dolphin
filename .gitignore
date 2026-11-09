@@ -18,6 +18,8 @@ data/
 .fixbot-mcp-server/
 .opencode/
 .screenshots/
+.relay/
+.skills/
 
 # 系统
 .DS_Store
