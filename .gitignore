@@ -20,6 +20,7 @@ data/
 .screenshots/
 .relay/
 .skills/
+.ai/
 
 # 系统
 .DS_Store
