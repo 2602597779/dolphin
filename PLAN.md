@@ -38,7 +38,7 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 - [x] T9.4 无 Key 兜底口径：若公司网络/账号限制使 T9.1 长期不可执行，话术稿采用诚实表述"离线桩全链路 + 注入 `DOLPHIN_API_KEY` 即切真实模型（业务代码零改动）"，并给出本地可复现命令与输出片段；**禁止虚构真实模型数据**——已启用：见 `docs/interview-script.md` 第四节 + `docs/real-model-run.md` 第四节（2026-11-10 实测 KEY=NOT_SET，不虚构）
 - [x] T9.5 自测验收：不打开代码能口述 8 节点链路 + 两个亮点故事 + 一条失败补偿路径；随机 5 个追问能在话术稿中指到对应 `file:line`；`mvn test` 225 用例全绿；除 `LeetcodeTest.java` 外工作区无未提交改动——已验证：`mvn test` 225 用例 0 失败（2026-11-10 实测）；话术稿可支撑口述与追问
 
-**完成标准**：`docs/interview-script.md` 与 `docs/real-model-run.md`（或 T9.4 兜底说明）入库并 commit；"下一步"不再指向阶段 5；新会话读本文件第一眼就先做阶段 9。
+**完成标准**：`docs/interview-script.md` 与 `docs/real-model-run.md`（或 T9.4 兜底说明）入库并 commit；"下一步"不再指向阶段 5；新会话读本文件第一眼就先做阶段 9。✅ 已达成（2026-11-10：话术稿 + 兜底口径已入库，`mvn test` 225 用例全绿；唯一遗留 T9.1 真实模型验证轮——待 `DOLPHIN_API_KEY`，执行指引已备好）
 
 ---
 
@@ -193,10 +193,10 @@ IM 卡片按钮 → IM 平台回调 → ApprovalCallbackController（平台适�
 
 ## 当前断点（每次会话结束必须更新）
 
-**最后更新**：2026-11-10（第十次会话：新增并置顶「阶段 9 面试冲刺」；速读/断点数据校正——37 测试类 225 用例、工作区 dirty 文件如实记录）
-**已完成**：H0~H3；**阶段 1~3 全部完成**（均已 commit）；**阶段 4 全部完成**（commit `f63a28c`）；**阶段 4.1 O1~O7 全部完成**（commit `c945eb8`）；**阶段 4.2 O8 异步化全部完成**（commit `b2e9e7f`）；**P1 全链路可见化完成**（commit `03cff20`：8 节点 traced 审计 + timeline API + 六幕演示剧本）；**阶段 7 CI + 阶段 8 Flyway 完成**（commit `885279c`：CI run 42183646528 全绿 + 空库迁移/存量库 baseline/幂等启动三路径亲测，详见第二梯队条目）
-**下一步**：先做**阶段 9 面试冲刺**（专节见项目背景之后的置顶章节；T9.2~T9.5 不依赖 Key 可直接做，T9.1 需 `DOLPHIN_API_KEY`）；阶段 5 IM 卡片审批降级为余力再做（T5.1~T5.9 原样保留）；阶段 6 暂缓（2026-11-06 决策，见第二梯队条目）；原计划「从阶段 5 开始」作废
-**git 状态**：`885279c` 已推 origin/main（Actions run 42183646528 全绿）；`d6dbe0c`（practice:LeetCode53）与本次三笔提交（practice LC189/238、chore .gitignore、docs PLAN 去重）已推送，origin/master 与 origin/main 对齐同一 HEAD；`LeetcodeTest.java` 口径=刷题题解随做随 commit 入库（`d6dbe0c` 先例，旧「不入库」口径作废）；`.relay/`、`.skills/` 已入 .gitignore；**工作区不干净**：`M src/main/java/com/dolphin/test/LeetcodeTest.java`（刷题练习改动，按 H0 保留，禁止为求 clean 删除或还原）；当前 HEAD=`3260cbc`；远程 master/main 并存，后续推送统一 `git push origin master` + `git push origin master:main`
+**最后更新**：2026-11-10（第十次会话：新增并置顶「阶段 9 面试冲刺」并完成 T9.2~T9.5——话术稿/数据口径表/兜底口径已入库；T9.1 待 `DOLPHIN_API_KEY`；速读/断点数据校正——37 测试类 225 用例、工作区 dirty 文件如实记录）
+**已完成**：H0~H3；**阶段 1~3 全部完成**（均已 commit）；**阶段 4 全部完成**（commit `f63a28c`）；**阶段 4.1 O1~O7 全部完成**（commit `c945eb8`）；**阶段 4.2 O8 异步化全部完成**（commit `b2e9e7f`）；**P1 全链路可见化完成**（commit `03cff20`：8 节点 traced 审计 + timeline API + 六幕演示剧本）；**阶段 7 CI + 阶段 8 Flyway 完成**（commit `885279c`：CI run 42183646528 全绿 + 空库迁移/存量库 baseline/幂等启动三路径亲测，详见第二梯队条目）；**阶段 9 面试冲刺基本完成**（T9.2~T9.5：`docs/interview-script.md` 话术稿 + 数据口径表 + 兜底口径入库；`docs/real-model-run.md` 执行指引已建；T9.1 真实模型验证轮待 Key）
+**下一步**：阶段 9 仅剩 **T9.1 真实模型验证轮**（拿到 `DOLPHIN_API_KEY` 后按 `docs/real-model-run.md` 执行指引跑六幕剧本并填写记录；无 Key 则维持 T9.4 兜底口径，禁止虚构）；阶段 5 IM 卡片审批为余力再做（T5.1~T5.9 原样保留）；阶段 6 暂缓（2026-11-06 决策，见第二梯队条目）；面试前动作：通读 `docs/interview-script.md` + 模拟追问
+**git 状态**：`885279c` 已推 origin/main（Actions run 42183646528 全绿）；`d6dbe0c`（practice:LeetCode53）与本次三笔提交（practice LC189/238、chore .gitignore、docs PLAN 去重）已推送，origin/master 与 origin/main 对齐同一 HEAD；`LeetcodeTest.java` 口径=刷题题解随做随 commit 入库（`d6dbe0c` 先例，旧「不入库」口径作废）；`.relay/`、`.skills/` 已入 .gitignore；**工作区不干净**：`M src/main/java/com/dolphin/test/LeetcodeTest.java`（刷题练习改动，按 H0 保留，禁止为求 clean 删除或还原）；`docs/` 新增两文件（interview-script.md、real-model-run.md）随本批 commit 入库；远程 master/main 并存，后续推送统一 `git push origin master` + `git push origin master:main`
 
 ### 已提交的进度凭证（git log 摘要）
 
