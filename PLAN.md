@@ -12,7 +12,7 @@
 ## 项目背景（新会话速读）
 
 Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + Spring AI Alibaba Graph + JPA/H2）。
-现状：多 Agent 图编排闭环、审批中断/resume、幂等/防重放/审计、状态全落库、告警诊断、RAG、质检、人工池均已实现，26 个测试类 153 用例全绿。
+现状：多 Agent 图编排闭环、审批中断/resume、幂等/防重放/审计、状态全落库、告警诊断、RAG、质检、人工池均已实现，37 个测试类 225 用例全绿（改造前基线 153 用例；该数字随阶段推进递增，以最新 `mvn test` 输出为准）。
 目标：从"技术真实的工具"升级为"业务真实的产品"，达到面试可讲、经得起追问的企业级形态。
 技术深度线（代码质量）**已够用，不再投入**；剩余工作全部是业务真实感补全。
 
@@ -22,6 +22,23 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 - [x] H1. `.gitignore` 增加 `.trae/`
 - [x] H2. 当前 P0 持久化改造未提交 → commit 进版本库（commit msg: "P0:状态全落库+并发串扰根治+离线演示链路"）
 - [x] H3. ~~删除 `com/dolphin/test` 目录~~ **已撤销：同 H0，用户要求保留**
+
+---
+
+## 阶段 9：面试冲刺（当前最高优先级，先于阶段 5/6）
+
+**为什么置顶**：代码深度已够（见项目背景），真正决定面试成败的是文档里从未存在的两样东西——**真实模型跑出的效果数据**和**经得起追问的话术稿**。2026-11-10 核查：全仓 grep 无"面试冲刺/阶段 9/真实模型验证"字样，断点却指向第二梯队的阶段 5，新会话必然先做 IM 审批，把最该做的验证轮挤掉。
+
+**前置条件**：T9.1 需要 `DOLPHIN_API_KEY` + 外网/代理可达 `coding.dashscope.aliyuncs.com`。2026-11-10 本机实测 `DOLPHIN_API_KEY` = NOT SET，故 **T9.1 需先解决 Key，T9.2~T9.5 不依赖 Key 可直接做**，无 Key 时不要空转。
+
+任务拆解：
+- [ ] T9.1 真实模型验证轮（前置：Key 可用）：不激活 offline profile，`mvn spring-boot:run` + `demo/walkthrough.sh` 六幕同剧本复跑；记录每幕真实模型输出（分诊/诊断/回复原文、审批中断、质检判定、`/api/metrics/summary` 数字）到 `docs/real-model-run.md`，注明模型名/时间/环境，保留失败与误判样本，并与离线桩同剧本对比（延迟、措辞、轮次）
+- [ ] T9.2 效果数据口径表：可讲数字固定三类并逐项标来源——①业务（自动化解决率/人工升级率/审批触发率/质检通过率/MTTR，取自 `summary()`）②工程（37 测试类 225 用例、CI run 42183646528、Flyway 三路径）③模型效果（真实模型轮成功率/人工接管率/平均轮次）；**离线桩数字必须标 offline，不得与真实模型混用**（叙事边界：不说"生产运行中"）
+- [ ] T9.3 话术稿 `docs/interview-script.md`：3 分钟项目自述（业务问题 → 架构分层 → 两个亮点故事：单例图串扰根治、受理≠完成基线验证）+ 高频追问问答（reply 从头重跑 vs approve 断点 resume、requestId 与 callbackId 幂等、租户隔离返回 404 不泄露存在性、SLA 只拉人兜底不改状态、`tryTransition` 受理闸门多实例安全、Flyway baseline 存量库、离线桩与真实模型零代码切换），每条结论附 `file:line`
+- [ ] T9.4 无 Key 兜底口径：若公司网络/账号限制使 T9.1 长期不可执行，话术稿采用诚实表述"离线桩全链路 + 注入 `DOLPHIN_API_KEY` 即切真实模型（业务代码零改动）"，并给出本地可复现命令与输出片段；**禁止虚构真实模型数据**
+- [ ] T9.5 自测验收：不打开代码能口述 8 节点链路 + 两个亮点故事 + 一条失败补偿路径；随机 5 个追问能在话术稿中指到对应 `file:line`；`mvn test` 225 用例全绿；除 `LeetcodeTest.java` 外工作区无未提交改动
+
+**完成标准**：`docs/interview-script.md` 与 `docs/real-model-run.md`（或 T9.4 兜底说明）入库并 commit；"下一步"不再指向阶段 5；新会话读本文件第一眼就先做阶段 9。
 
 ---
 
@@ -75,7 +92,7 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 ## 第二梯队（有余力再做，不影响主线）
 
 - [x] 阶段 4：工单多轮对话 `POST /api/tickets/{id}/reply`（对话历史进图状态，PENDING 单基于上下文续跑）——业务真实感最大单点
-- [ ] 阶段 5：IM 卡片审批（平台无关回调协议 + 钉钉参考实现）——方案 2026-11-09 定稿，任务拆解与面试话术见下方「2026-11-09 定稿」专节
+- [ ] 阶段 5：IM 卡片审批（平台无关回调协议 + 钉钉参考实现）——方案 2026-11-09 定稿，任务拆解与面试话术见下方「2026-11-09 定稿」专节——**2026-11-10 降级：让位于阶段 9 面试冲刺，余力再做**
 - [ ] 阶段 6：运营指标接入可观测体系（2026-11-06 决策改版：放弃"静态 HTML 简单页"方案，改为 Micrometer 业务指标暴露 + Prometheus 抓取 + Grafana dashboard JSON 入库的企业标准路线；代码侧约 1 天：actuator+micrometer-registry-prometheus 依赖、BusinessMetricsBinder 把 summary() 七指标注册 Gauge、TicketService 事件 Counter 埋点、prometheus.yml 与 dashboard JSON 入 ops/；**当前暂缓**，面试定位=效果验证章节的收尾，非核心考点；钉钉同理华为内部无钉钉，叙事用"WeLink 架构同构、钉钉沙箱真机验证"双层话术）
 - [x] 阶段 7：GitHub Actions CI（mvn test）——`.github/workflows/ci.yml`（push/PR 到 main，temurin 21 + Maven 缓存，测试离线自洽零密钥）。2026-11-06 真实验证：push `885279c` → Actions run 42183646528 全绿（https://github.com/2602597779/dolphin/actions/runs/42183646528）
 - [x] 阶段 8：Flyway 管 schema（替换 ddl-auto: update）——`flyway-core` + `V1__baseline.sql`（11 表全量 DDL，自真实 H2 库 `SCRIPT NODATA` 导出、约束名规范化，保证与 Hibernate 6 映射零漂移）+ `ddl-auto: validate` + `baseline-on-migrate: 1`（存量 ./data 库自动打基线，新库正常执行 V1）+ mysql profile 暂停用（`flyway.enabled: false` + `ddl-auto: update`，H2 方言基线不跨库）。2026-11-06 三条路径真实验证：①空库迁移 `mvn test` 225 用例全绿（每个测试上下文空库执行 V1+validate）②存量库 baseline 全程亲测（pre-baseline 11 表库 → 启动自动打 baseline version=1 跳过 V1 → validate 通过 → 老工单/客户数据完好）③基线后幂等启动（Schema up to date. No migration necessary）
@@ -176,10 +193,10 @@ IM 卡片按钮 → IM 平台回调 → ApprovalCallbackController（平台适�
 
 ## 当前断点（每次会话结束必须更新）
 
-**最后更新**：2026-11-09（第九次会话：阶段 5 规划去重定稿 + LeetcodeTest 入库口径修正 + 远程分支对齐）
+**最后更新**：2026-11-10（第十次会话：新增并置顶「阶段 9 面试冲刺」；速读/断点数据校正——37 测试类 225 用例、工作区 dirty 文件如实记录）
 **已完成**：H0~H3；**阶段 1~3 全部完成**（均已 commit）；**阶段 4 全部完成**（commit `f63a28c`）；**阶段 4.1 O1~O7 全部完成**（commit `c945eb8`）；**阶段 4.2 O8 异步化全部完成**（commit `b2e9e7f`）；**P1 全链路可见化完成**（commit `03cff20`：8 节点 traced 审计 + timeline API + 六幕演示剧本）；**阶段 7 CI + 阶段 8 Flyway 完成**（commit `885279c`：CI run 42183646528 全绿 + 空库迁移/存量库 baseline/幂等启动三路径亲测，详见第二梯队条目）
-**下一步**：从**阶段 5 IM 卡片审批**开始（任务拆解见上方「2026-11-09 定稿」专节，T5.1~T5.9 依次执行）；阶段 6 暂缓（2026-11-06 决策，见第二梯队条目）
-**git 状态**：`885279c` 已推 origin/main（Actions run 42183646528 全绿）；`d6dbe0c`（practice:LeetCode53）与本次三笔提交（practice LC189/238、chore .gitignore、docs PLAN 去重）已推送，origin/master 与 origin/main 对齐同一 HEAD；`LeetcodeTest.java` 口径=刷题题解随做随 commit 入库（`d6dbe0c` 先例，旧「不入库」口径作废）；`.relay/`、`.skills/` 已入 .gitignore，工作区干净；远程 master/main 并存，后续推送统一 `git push origin master` + `git push origin master:main`
+**下一步**：先做**阶段 9 面试冲刺**（专节见项目背景之后的置顶章节；T9.2~T9.5 不依赖 Key 可直接做，T9.1 需 `DOLPHIN_API_KEY`）；阶段 5 IM 卡片审批降级为余力再做（T5.1~T5.9 原样保留）；阶段 6 暂缓（2026-11-06 决策，见第二梯队条目）；原计划「从阶段 5 开始」作废
+**git 状态**：`885279c` 已推 origin/main（Actions run 42183646528 全绿）；`d6dbe0c`（practice:LeetCode53）与本次三笔提交（practice LC189/238、chore .gitignore、docs PLAN 去重）已推送，origin/master 与 origin/main 对齐同一 HEAD；`LeetcodeTest.java` 口径=刷题题解随做随 commit 入库（`d6dbe0c` 先例，旧「不入库」口径作废）；`.relay/`、`.skills/` 已入 .gitignore；**工作区不干净**：`M src/main/java/com/dolphin/test/LeetcodeTest.java`（刷题练习改动，按 H0 保留，禁止为求 clean 删除或还原）；当前 HEAD=`3260cbc`；远程 master/main 并存，后续推送统一 `git push origin master` + `git push origin master:main`
 
 ### 已提交的进度凭证（git log 摘要）
 
@@ -220,7 +237,7 @@ IM 卡片按钮 → IM 平台回调 → ApprovalCallbackController（平台适�
 ### 会话恢复指引（新会话照此操作）
 
 1. 读本文件"当前断点"章节 + 跑 `git log --oneline -10` + `git status --short`
-2. 找到状态为 `[ ]` 的最靠前任务，按其"完成标准"实现
+2. 按「当前断点·下一步」给出的优先级取第一个 `[ ]` 任务（当前=阶段 9），**不要机械取文档中最靠前的未勾选项**（阶段 5 已降级，专节仍在，按下单顺序会先撞到 T5.1），按其"完成标准"实现
 3. 做完勾选、更新本章节、commit
 4. 若任务做一半被打断：把已完成的部分 + 剩余步骤写在下面"进行中备忘"里
 
