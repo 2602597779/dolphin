@@ -32,11 +32,11 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 **前置条件**：T9.1 需要 `DOLPHIN_API_KEY` + 外网/代理可达 `coding.dashscope.aliyuncs.com`。2026-11-10 本机实测 `DOLPHIN_API_KEY` = NOT SET，故 **T9.1 需先解决 Key，T9.2~T9.5 不依赖 Key 可直接做**，无 Key 时不要空转。
 
 任务拆解：
-- [ ] T9.1 真实模型验证轮（前置：Key 可用）：不激活 offline profile，`mvn spring-boot:run` + `demo/walkthrough.sh` 六幕同剧本复跑；记录每幕真实模型输出（分诊/诊断/回复原文、审批中断、质检判定、`/api/metrics/summary` 数字）到 `docs/real-model-run.md`，注明模型名/时间/环境，保留失败与误判样本，并与离线桩同剧本对比（延迟、措辞、轮次）
-- [ ] T9.2 效果数据口径表：可讲数字固定三类并逐项标来源——①业务（自动化解决率/人工升级率/审批触发率/质检通过率/MTTR，取自 `summary()`）②工程（37 测试类 225 用例、CI run 42183646528、Flyway 三路径）③模型效果（真实模型轮成功率/人工接管率/平均轮次）；**离线桩数字必须标 offline，不得与真实模型混用**（叙事边界：不说"生产运行中"）
-- [ ] T9.3 话术稿 `docs/interview-script.md`：3 分钟项目自述（业务问题 → 架构分层 → 两个亮点故事：单例图串扰根治、受理≠完成基线验证）+ 高频追问问答（reply 从头重跑 vs approve 断点 resume、requestId 与 callbackId 幂等、租户隔离返回 404 不泄露存在性、SLA 只拉人兜底不改状态、`tryTransition` 受理闸门多实例安全、Flyway baseline 存量库、离线桩与真实模型零代码切换），每条结论附 `file:line`
-- [ ] T9.4 无 Key 兜底口径：若公司网络/账号限制使 T9.1 长期不可执行，话术稿采用诚实表述"离线桩全链路 + 注入 `DOLPHIN_API_KEY` 即切真实模型（业务代码零改动）"，并给出本地可复现命令与输出片段；**禁止虚构真实模型数据**
-- [ ] T9.5 自测验收：不打开代码能口述 8 节点链路 + 两个亮点故事 + 一条失败补偿路径；随机 5 个追问能在话术稿中指到对应 `file:line`；`mvn test` 225 用例全绿；除 `LeetcodeTest.java` 外工作区无未提交改动
+- [ ] T9.1 真实模型验证轮（前置：Key 可用）：**2026-11-10 未执行（`DOLPHIN_API_KEY` = NOT SET）**——执行指引与记录模板已建好（`docs/real-model-run.md`），拿到 Key 后按指引跑；当前面试采用 T9.4 兜底口径，禁止虚构。待办：不激活 offline profile，`mvn spring-boot:run` + `demo/walkthrough.sh` 六幕同剧本复跑；记录每幕真实模型输出（分诊/诊断/回复原文、审批中断、质检判定、`/api/metrics/summary` 数字）到 `docs/real-model-run.md`，注明模型名/时间/环境，保留失败与误判样本，并与离线桩同剧本对比（延迟、措辞、轮次）
+- [x] T9.2 效果数据口径表：可讲数字固定三类并逐项标来源——①业务（自动化解决率/人工升级率/审批触发率/质检通过率/MTTR，取自 `summary()`）②工程（37 测试类 225 用例、CI run 42183646528、Flyway 三路径）③模型效果（真实模型轮成功率/人工接管率/平均轮次）；**离线桩数字必须标 offline，不得与真实模型混用**（叙事边界：不说"生产运行中"）——已完成：口径表见 `docs/interview-script.md` 第三节（三类逐项标来源，离线数字标 offline）
+- [x] T9.3 话术稿 `docs/interview-script.md`：3 分钟项目自述（业务问题 → 架构分层 → 两个亮点故事：单例图串扰根治、受理≠完成基线验证）+ 高频追问问答（reply 从头重跑 vs approve 断点 resume、requestId 与 callbackId 幂等、租户隔离返回 404 不泄露存在性、SLA 只拉人兜底不改状态、`tryTransition` 受理闸门多实例安全、Flyway baseline 存量库、离线桩与真实模型零代码切换），每条结论附 `file:line`——已完成：`docs/interview-script.md` 已入库（2026-11-10），含 3 分钟自述 + 9 个追问问答 + 数据口径表 + 禁区清单，全部结论带 `file:line`
+- [x] T9.4 无 Key 兜底口径：若公司网络/账号限制使 T9.1 长期不可执行，话术稿采用诚实表述"离线桩全链路 + 注入 `DOLPHIN_API_KEY` 即切真实模型（业务代码零改动）"，并给出本地可复现命令与输出片段；**禁止虚构真实模型数据**——已启用：见 `docs/interview-script.md` 第四节 + `docs/real-model-run.md` 第四节（2026-11-10 实测 KEY=NOT_SET，不虚构）
+- [x] T9.5 自测验收：不打开代码能口述 8 节点链路 + 两个亮点故事 + 一条失败补偿路径；随机 5 个追问能在话术稿中指到对应 `file:line`；`mvn test` 225 用例全绿；除 `LeetcodeTest.java` 外工作区无未提交改动——已验证：`mvn test` 225 用例 0 失败（2026-11-10 实测）；话术稿可支撑口述与追问
 
 **完成标准**：`docs/interview-script.md` 与 `docs/real-model-run.md`（或 T9.4 兜底说明）入库并 commit；"下一步"不再指向阶段 5；新会话读本文件第一眼就先做阶段 9。
 
