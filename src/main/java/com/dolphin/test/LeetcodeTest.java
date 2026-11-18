@@ -77,6 +77,62 @@ public class LeetcodeTest {
 //        int[] nums18 = {-1, 1, 0, -3, 3};
 //        System.out.println(Arrays.toString(productExceptSelf(nums18))); // [0,0,9,0,0]
 
+        // 测试除自身以外数组的乘积（哈希版本）
+        System.out.println(Arrays.toString(productExceptSelfWithHash(nums17))); // [24,12,8,6]
+
+        // 测试设矩阵为零
+        int[][] matrix1 = {{1, 1, 1}, {1, 0, 1}, {1, 1, 1}};
+        setZeroes(matrix1);
+        System.out.println(Arrays.deepToString(matrix1)); // [[1,0,1],[0,0,0],[1,0,1]]
+
+        int[][] matrix2 = {{0, 1, 2, 0}, {3, 4, 5, 2}, {1, 3, 1, 5}};
+        setZeroes(matrix2);
+        System.out.println(Arrays.deepToString(matrix2)); // [[0,0,0,0],[0,4,5,0],[0,3,1,0]]
+
+        // 测试螺旋矩阵
+        int[][] matrix3 = {{1, 2, 3}, {4, 5, 6}, {7, 8, 9}};
+        System.out.println(spiralOrder(matrix3)); // [1,2,3,6,9,8,7,4,5]
+
+        int[][] matrix4 = {{1, 2, 3, 4}, {5, 6, 7, 8}, {9, 10, 11, 12}};
+        System.out.println(spiralOrder(matrix4)); // [1,2,3,4,8,12,11,10,9,5,6,7]
+
+        int[][] matrix5 = {{1, 2}, {3, 4}};
+        System.out.println(spiralOrder(matrix5)); // [1,2,4,3]
+
+        // 测试相交链表
+        // 示例1：交点为值8的节点
+        // listA = [4,1,8,4,5], listB = [5,6,1,8,4,5], 从8开始相交
+        ListNode shared1 = buildList(new int[]{8, 4, 5});
+        ListNode headA1 = buildListPrefix(new int[]{4, 1}, shared1);
+        ListNode headB1 = buildListPrefix(new int[]{5, 6, 1}, shared1);
+        ListNode res13 = getIntersectionNode(headA1, headB1);
+        System.out.println(res13 != null ? "交点: " + res13.val : "null"); // 交点: 8
+
+        // 示例2：交点为值2的节点
+        ListNode shared2 = buildList(new int[]{2, 4});
+        ListNode headA2 = buildListPrefix(new int[]{1, 9, 1}, shared2);
+        ListNode headB2 = buildListPrefix(new int[]{3}, shared2);
+        ListNode res23 = getIntersectionNode(headA2, headB2);
+        System.out.println(res23 != null ? "交点: " + res23.val : "null"); // 交点: 2
+
+        // 示例3：无交点
+        ListNode headA3 = buildList(new int[]{2, 6, 4});
+        ListNode headB3 = buildList(new int[]{1, 5});
+        ListNode res34 = getIntersectionNode(headA3, headB3);
+        System.out.println(res34 != null ? "交点: " + res34.val : "null"); // null
+
+        // 测试 decode
+        // 表达式中 @ 和 $ 的运算规则：
+        // @ 运算：左右两边各取一个数，结果 = 2*左 + 右 + 3，两边都替换成结果
+        // $ 运算：左边的当前累积结果 和 右边的数，结果 = 3*左 + 2*右 + 1
+
+        System.out.println(decode("10@5$3"));    // 先@→2*10+5+3=28 再$→3*28+2*3+1=91
+
+        System.out.println(decodeBrute("2@3"));       // 10
+        System.out.println(decodeBrute("2$3"));       // 13
+        System.out.println(decodeBrute("1@2$3"));     // 22
+        System.out.println(decodeBrute("10@5$3"));    // 91
+
     }
 
     /**
@@ -751,6 +807,10 @@ public class LeetcodeTest {
             // 然后更新 prefix：把 nums[i] 乘进去
             // 这样下次循环时，prefix 就变成了 nums[0]*...*nums[i]
             prefix *= nums[i];
+
+            System.out.println("第一遍 i=" + i + "  nums[i]=" + nums[i]
+                    + "  answer=" + Arrays.toString(answer)
+                    + "  prefix=" + prefix);
         }
         // 第一遍结束后：answer[i] = 左边所有元素的乘积
         // 例如 [1,2,3,4] → answer = [1, 1, 2, 6]
@@ -778,11 +838,677 @@ public class LeetcodeTest {
             // 更新 suffix：把 nums[i] 乘进去
             // 这样下次循环（i-1）时，suffix 就是 nums[i]*nums[i+1]*...*nums[n-1]
             suffix *= nums[i];
+
+            System.out.println("第二遍 i=" + i + "  nums[i]=" + nums[i]
+                    + "  answer=" + Arrays.toString(answer)
+                    + "  suffix=" + suffix);
         }
         // 第二遍结束后：answer[i] = 左边乘积 × 右边乘积 = 除 nums[i] 外所有元素的乘积
         // 例如 [1,2,3,4] → answer = [24, 12, 8, 6]
 
         return answer;
+    }
+
+    public static int[] productExceptSelfWithHash(int[] nums) {
+        int n = nums.length;
+        Map<Integer, Integer> prefixMap = new HashMap<>();
+
+        int prefix = 1;
+        for (int i = 0; i < n; i++) {
+            prefixMap.put(i, prefix);
+            prefix *= nums[i];
+        }
+
+        int[] answer = new int[n];
+        int suffix = 1;
+        for (int i = n - 1; i >= 0; i--) {
+            answer[i] = prefixMap.get(i) * suffix;
+            suffix *= nums[i];
+        }
+
+        return answer;
+    }
+
+    /**
+     * 设矩阵为零（LeetCode 73）
+     *
+     * 【题目】
+     * 给定一个 m x n 的矩阵，如果一个元素为 0，则将其所在行和列的所有元素都设为 0。要求原地算法。
+     *
+     * 【为什么不能直接改成 0？】
+     * 如果把 matrix[i][j] 改成 0，那么后续处理矩阵时，
+     * 无法区分"这个 0 是原来就有的"还是"被我改掉的"，
+     * 导致本该保留的非零元素被误杀。
+     *
+     * 【核心思路：用第一行和第一列当"标记区"】
+     *
+     * 空间要求是 O(1)，不能开额外的 boolean[m][n] 记录哪些行/列该置零。
+     * 但我们可以**借用矩阵的第一行和第一列**来存储行/列的标记：
+     * - matrix[0][j] == 0 → 说明第 j 列需要置零
+     * - matrix[i][0] == 0 → 说明第 i 行需要置零
+     *
+     * 但第一行和第一列自己本身呢？用一个 `firstRowZero` 和 `firstColZero`
+     * 来记录它们原本是否包含 0。
+     *
+     * 【执行步骤】
+     *
+     * 第①步：记录第一行、第一列原来是否有 0
+     *   firstRowZero = 第一行是否有0
+     *   firstColZero = 第一列是否有0
+     *
+     * 第②步：遍历矩阵（跳过第一行第一列），发现 0 就标记
+     *   matrix[i][j] == 0 时：
+     *     matrix[i][0] = 0   ← 标记"第 i 行要置零"
+     *     matrix[0][j] = 0   ← 标记"第 j 列要置零"
+     *
+     * 第③步：根据标记，把矩阵内部（不含第一行第一列）置零
+     *   for i 从 1 到 m-1：
+     *     for j 从 1 到 n-1：
+     *       if matrix[i][0] == 0 || matrix[0][j] == 0:
+     *         matrix[i][j] = 0
+     *
+     * 第④步：处理第一列（根据 firstColZero）
+     *   if firstColZero: 第一列全部置 0
+     *
+     * 第⑤步：处理第一行（根据 firstRowZero）
+     *   if firstRowZero: 第一行全部置 0
+     *
+     * 第④⑤步必须在第③步之后，因为第一行第一列的标记值在第③步还要用，
+     * 如果提前改了就会丢失信息。
+     *
+     * 【手动推演】
+     * 矩阵 = {{0, 1, 2, 0}, {3, 4, 5, 2}, {1, 3, 1, 5}}
+     *
+     * 第①步：
+     *   第一行 = [0,1,2,0]，有0 → firstRowZero = true
+     *   第一列 = [0,3,1]，有0 → firstColZero = true
+     *
+     * 第②步：遍历 i=1..2, j=1..3
+     *   没有发现 0，标记区不变：
+     *   第一行标记 = [0, 1, 2, 0]  （第0列、第3列要置零）
+     *   第一列标记 = [0, 3, 1]     （第0行要置零——但第0行已在firstRowZero里记录）
+     *
+     * 第③步：根据标记置零内部
+     *   matrix[1][j]: matrix[1][0]=3≠0, 但 matrix[0][j] 中 j=3 时为 0 → matrix[1][3]=0
+     *   matrix[2][j]: matrix[2][0]=1≠0, 但 matrix[0][j] 中 j=3 时为 0 → matrix[2][3]=0
+     *   结果内部：
+     *     {3,4,5,0}
+     *     {1,3,1,0}
+     *
+     * 第④步：firstColZero=true，第一列全置 0
+     *   column0 = [0, 0, 0]
+     *
+     * 第⑤步：firstRowZero=true，第一行全置 0
+     *   row0 = [0, 0, 0, 0]
+     *
+     * 最终：
+     *   {{0,0,0,0}, {0,4,5,0}, {0,3,1,0}} ✓
+     *
+     * 【时间复杂度】O(m × n)  遍历矩阵常数次
+     * 【空间复杂度】O(1)  只用 firstRowZero/firstColZero 两个布尔变量
+     *
+     * 【示例】
+     *   [[1,1,1],[1,0,1],[1,1,1]] → [[1,0,1],[0,0,0],[1,0,1]]
+     *   [[0,1,2,0],[3,4,5,2],[1,3,1,5]] → [[0,0,0,0],[0,4,5,0],[0,3,1,0]]
+     */
+    public static void setZeroes(int[][] matrix) {
+        if (matrix == null || matrix.length == 0 || matrix[0].length == 0) {
+            return;
+        }
+
+        int m = matrix.length;
+        int n = matrix[0].length;
+
+        // ============================================================
+        // 第①步：检查第一行和第一列是否原本包含 0
+        // 这两个标记必须在任何修改之前记录，因为后面我们会用第一行第一列做标记区
+        // ============================================================
+
+        // firstRowZero：第一行是否原本就有 0
+        // 如果第一行有 0，最终整行都要置 0
+        boolean firstRowZero = false;
+        for (int j = 0; j < n; j++) {
+            if (matrix[0][j] == 0) {
+                firstRowZero = true;
+                break;
+            }
+        }
+
+        // firstColZero：第一列是否原本就有 0
+        // 如果第一列有 0，最终整列都要置 0
+        boolean firstColZero = false;
+        for (int i = 0; i < m; i++) {
+            if (matrix[i][0] == 0) {
+                firstColZero = true;
+                break;
+            }
+        }
+
+        // ============================================================
+        // 第②步：遍历矩阵内部（跳过第一行第一列），
+        // 发现 0 就在对应的行标记（matrix[i][0]）和列标记（matrix[0][j]）位置打标记
+        // ============================================================
+        for (int i = 1; i < m; i++) {
+            for (int j = 1; j < n; j++) {
+                if (matrix[i][j] == 0) {
+                    // matrix[i][0] = 0 表示"第 i 行需要置零"
+                    matrix[i][0] = 0;
+                    // matrix[0][j] = 0 表示"第 j 列需要置零"
+                    matrix[0][j] = 0;
+                }
+            }
+        }
+
+        // ============================================================
+        // 第③步：根据标记，把矩阵内部（不含第一行第一列）的元素置零
+        //
+        // 注意：这里必须先于第④⑤步，因为第一行第一列的标记值
+        // 在第④⑤步之前还要用来决定哪些内部元素该置零
+        // ============================================================
+        for (int i = 1; i < m; i++) {
+            for (int j = 1; j < n; j++) {
+                // 如果第 i 行标记为 0（matrix[i][0]==0）
+                // 或者第 j 列标记为 0（matrix[0][j]==0）
+                // 则 matrix[i][j] 必须置为 0
+                if (matrix[i][0] == 0 || matrix[0][j] == 0) {
+                    matrix[i][j] = 0;
+                }
+            }
+        }
+
+        // ============================================================
+        // 第④步：处理第一列
+        // 如果第一列原本就有 0，整列都要置 0
+        // 包括 matrix[0][0]（它同时属于第一行第一列，但在这里统一处理）
+        // ============================================================
+        if (firstColZero) {
+            for (int i = 0; i < m; i++) {
+                matrix[i][0] = 0;
+            }
+        }
+
+        // ============================================================
+        // 第⑤步：处理第一行
+        // 如果第一行原本就有 0，整行都要置 0
+        // 注意：第⑤步必须在第④步之后，
+        // 否则第④步会把第一列的标记改掉，影响第⑤步对第一行其他元素的处理
+        // （实际上第一行第一列只有一个元素，但保持这个顺序更安全）
+        // ============================================================
+        if (firstRowZero) {
+            for (int j = 0; j < n; j++) {
+                matrix[0][j] = 0;
+            }
+        }
+    }
+
+    /**
+     * 螺旋矩阵（LeetCode 54）
+     *
+     * 【题目】
+     * 给你一个 m 行 n 列的矩阵，按照顺时针螺旋顺序返回矩阵中的所有元素。
+     *
+     * 【什么是顺时针螺旋】
+     * 从左上角开始，依次走：→ 右、↓ 下、← 左、↑ 上，走完一圈后收缩边界，继续走内圈。
+     *
+     * 以 [[1,2,3],[4,5,6],[7,8,9]] 为例：
+     *   → 右走第一行：  1, 2, 3
+     *   ↓ 下走最后一列：6, 9
+     *   ← 左走最后一行：8, 7
+     *   ↑ 上走第一列：  4
+     *   → 右走中间剩余：5
+     *   结果：[1, 2, 3, 6, 9, 8, 7, 4, 5]
+     *
+     * 【核心思路：四边界收缩法】
+     *
+     * 维护四个边界：top, bottom, left, right
+     * 每走完一个方向，对应的边界就收缩一格：
+     *   向右 → 走完后 top++（第一行已经走过了）
+     *   向下 → 走完后 right--（最后一列已经走过了）
+     *   向左 → 走完后 bottom--（最后一行已经走过了）
+     *   向上 → 走完后 left++（第一列已经走过了）
+     *
+     * 循环条件：top <= bottom && left <= right
+     * 每次走完一个方向后，检查边界是否已交叉，交叉了就跳出
+     *
+     * 【手动推演】[[1,2,3],[4,5,6],[7,8,9]]
+     *
+     * 初始：top=0, bottom=2, left=0, right=2
+     *
+     * ① 向右遍历第 top 行（row=0），从 left 到 right：
+     *    访问 matrix[0][0]=1, matrix[0][1]=2, matrix[0][2]=3
+     *    结果 = [1, 2, 3]
+     *    top++ → top=1
+     *
+     * ② 向下遍历第 right 列（col=2），从 top 到 bottom：
+     *    访问 matrix[1][2]=6, matrix[2][2]=9
+     *    结果 = [1, 2, 3, 6, 9]
+     *    right-- → right=1
+     *
+     * ③ 向左遍历第 bottom 行（row=2），从 right 到 left：
+     *    访问 matrix[2][1]=8, matrix[2][0]=7
+     *    结果 = [1, 2, 3, 6, 9, 8, 7]
+     *    bottom-- → bottom=1
+     *
+     * ④ 向上遍历第 left 列（col=0），从 bottom 到 top：
+     *    访问 matrix[1][0]=4
+     *    结果 = [1, 2, 3, 6, 9, 8, 7, 4]
+     *    left++ → left=1
+     *
+     * 检查：top=1<=bottom=1, left=1<=right=1，继续
+     *
+     * ⑤ 向右遍历第 top 行（row=1），从 left 到 right：
+     *    访问 matrix[1][1]=5
+     *    结果 = [1, 2, 3, 6, 9, 8, 7, 4, 5]
+     *    top++ → top=2
+     *
+     * 检查：top=2 > bottom=1，停止
+     *
+     * 最终：[1, 2, 3, 6, 9, 8, 7, 4, 5] ✓
+     *
+     * 【为什么要检查边界？】
+     * 走完一个方向后，剩下的可能只是一行或一列（甚至一个点）。
+     * 如果不检查直接走下一步，会重复访问或越界。
+     * 例如走完 top 行后，如果 top > bottom，说明只剩一行已经走完了，
+     * 再走 down 方向就会越界，必须在每步检查。
+     *
+     * 【一个关键细节】
+     * 在"向左"和"向上"的步骤里，遍历范围是 right 到 left（而不是 left 到 right），
+     * 以及 bottom 到 top（而不是 top 到 bottom），方向是反的。
+     * 这是因为螺旋是顺时针的，走完右边后开始往回走。
+     *
+     * 【时间复杂度】O(m × n)  每个元素恰好访问一次
+     * 【空间复杂度】O(1)  除了结果数组，只用四个边界变量
+     *
+     * 【示例】
+     *   [[1,2,3],[4,5,6],[7,8,9]] → [1,2,3,6,9,8,7,4,5]
+     *   [[1,2,3,4],[5,6,7,8],[9,10,11,12]] → [1,2,3,4,8,12,11,10,9,5,6,7]
+     *   [[1,2],[3,4]] → [1,2,4,3]
+     */
+    public static List<Integer> spiralOrder(int[][] matrix) {
+        List<Integer> result = new ArrayList<>();
+        if (matrix == null || matrix.length == 0 || matrix[0].length == 0) {
+            return result;
+        }
+
+        int m = matrix.length;
+        int n = matrix[0].length;
+
+        // top：上边界，初始为第 0 行
+        int top = 0;
+        // bottom：下边界，初始为最后一行
+        int bottom = m - 1;
+        // left：左边界，初始为第 0 列
+        int left = 0;
+        // right：右边界，初始为最后一列
+        int right = n - 1;
+
+        // 当四个边界没有交叉时，还有未访问的区域，继续走
+        while (top <= bottom && left <= right) {
+
+            for (int col = left; col <= right; col++) {
+                result.add(matrix[top][col]);
+            }
+            // 走完了 top 行，上边界下移一格
+            top++;
+
+            if (top > bottom) break;
+
+            for (int row = top; row <= bottom; row++) {
+                result.add(matrix[row][right]);
+            }
+            // 走完了 right 列，右边界左移一格
+            right--;
+
+            // 检查：如果 left 超过了 right，说明只剩一列已经走完了
+            if (left > right) break;
+
+            for (int col = right; col >= left; col--) {
+                result.add(matrix[bottom][col]);
+            }
+            // 走完了 bottom 行，下边界上移一格
+            bottom--;
+
+            // 检查：如果 top 超过了 bottom
+            if (top > bottom) break;
+
+            for (int row = bottom; row >= top; row--) {
+                result.add(matrix[row][left]);
+            }
+            // 走完了 left 列，左边界右移一格
+            left++;
+        }
+
+        return result;
+    }
+
+    /**
+     * 链表节点定义
+     */
+    static class ListNode {
+        int val;
+        ListNode next;
+
+        ListNode(int val) {
+            this.val = val;
+            this.next = null;
+        }
+    }
+
+    /**
+     * 辅助方法：根据 int[] 构建链表，返回头节点
+     */
+    private static ListNode buildList(int[] vals) {
+        ListNode dummy = new ListNode(0);
+        ListNode cur = dummy;
+        for (int v : vals) {
+            cur.next = new ListNode(v);
+            cur = cur.next;
+        }
+        return dummy.next;
+    }
+
+    /**
+     * 辅助方法：构建前缀链表，末尾接到 shared 节点上
+     * 用于模拟两条链表在 shared 处相交
+     */
+    private static ListNode buildListPrefix(int[] prefix, ListNode shared) {
+        ListNode dummy = new ListNode(0);
+        ListNode cur = dummy;
+        for (int v : prefix) {
+            cur.next = new ListNode(v);
+            cur = cur.next;
+        }
+        cur.next = shared; // 结尾接到共享节点
+        return dummy.next;
+    }
+
+    /**
+     * 辅助方法：把链表转成字符串，方便打印
+     */
+    private static String listToString(ListNode head) {
+        List<Integer> vals = new ArrayList<>();
+        while (head != null) {
+            vals.add(head.val);
+            head = head.next;
+        }
+        return vals.toString();
+    }
+
+    /**
+     * 相交链表（LeetCode 160）
+     *
+     * 【题目】
+     * 给你两个单链表的头节点 headA 和 headB，找出并返回两个单链表相交的起始节点。
+     * 如果不存在，返回 null。
+     *
+     * 【关键提醒：相交 = 内存中同一个节点，不是值相同】
+     * 题目特别强调：相交节点是**在内存中指向同一个位置**的节点，
+     * 而不是值相同的节点。
+     *
+     * 例如 listA = [4,1,8,4,5], listB = [5,6,1,8,4,5]，
+     * A 中第二个节点值=1，B 中第三个节点值=1，
+     * 但它们**不是同一个节点**（内存地址不同，只是值恰好相同），不算相交。
+     * 真正相交的是 A 中第三个节点 和 B 中第四个节点，它们值都是 8，
+     * 且 **是同一个对象**（next 指针指向同一块内存），这才是交点。
+     *
+     * 所以判断相交必须用 **==**（引用比较，判断是否同一对象），
+     * 不能用 **equals** 或比较 val 值。
+     *
+     * 【核心思路：双指针等长对齐法】
+     *
+     * 问题本质：两条链表在尾部有一段公共部分，前面各有一段"私有前缀"。
+     *
+     *       A 的私有部分    B 的私有部分
+     *          len(a)           len(b)
+     *             ↓                 ↓
+     *          [A: 4,1]        [B: 5,6,1]
+     *              \                 /
+     *               \               /
+     *                ↓             ↓
+     *              公共尾部 [8, 4, 5]
+     *
+     * 如果 a < b，链表 A 比 B 短，
+     * 让 B 先走 (b - a) 步，走到和 A 的"起点"对齐的位置，
+     * 然后 A 和 B 同时往前走，第一个相遇的节点就是交点。
+     *
+     * 【更简洁的写法：双指针接力法】
+     *
+     * 不需要先求长度！让两个指针各自走到链表尾后"接力"到另一条链表头：
+     *   指针 p 从 headA 出发，走完后接到 headB 的起点继续走
+     *   指针 q 从 headB 出发，走完后接到 headA 的起点继续走
+     *
+     * p 走的总步数 = a + b
+     * q 走的总步数 = b + a
+     *
+     * 两条路径长度相等，所以 p 和 q **一定**在同一步到达交点（或同时到 null）。
+     *
+     * 为什么一定同时到达交点？
+     *   设 A 私有长度为 a，B 私有长度为 b，公共尾部长度为 c。
+     *   交点位置（从各自头节点算起）：
+     *     从 A 头到交点 = a + c  （但 p 在走完 A 后还要走 B 的私有段才到交点）
+     *     p 的路径：headA → 走 a 步到 A 尾 → 接力到 headB → 走 b 步到交点
+     *     p 到交点总共走了 a + b 步
+     *
+     *     同理 q 到交点也走了 b + a 步
+     *
+     *     所以 p 和 q 同时到达交点。
+     *
+     *   如果没有交点，p 和 q 同时到达 null（走了 a + b 步后都到了另一条链表的尾）。
+     *
+     * 【手动推演】
+     *
+     * 示例1：listA = [4,1,8,4,5], listB = [5,6,1,8,4,5]
+     * A 私有 = [4,1]（a=2）, B 私有 = [5,6,1]（b=3）, 公共尾部 = [8,4,5]（c=3）
+     *
+     * p 走 A:  4 → 1 → 8 → 4 → 5 → null  （5步）
+     *          接力到 B: 5 → 6 → 1 → 8 ← 交点  （此时 p 总共走了 5+4=9步）
+     *
+     * q 走 B:  5 → 6 → 1 → 8 → 4 → 5 → null  （6步）
+     *          接力到 A: 4 → 1 → 8 ← 交点  （此时 q 总共走了 6+3=9步）
+     *
+     * p 和 q 都走了 9 步，同时到达值为 8 的交点 ✓
+     *
+     * 无交点示例：listA = [2,6,4], listB = [1,5]
+     * A 长 a=3, B 长 b=2
+     *
+     * p 走 A:  2 → 6 → 4 → null  （3步）
+     *          接力到 B: 1 → 5 → null  （共 5 步）  (a+b=5)
+     *
+     * q 走 B:  1 → 5 → null  （2步）
+     *          接力到 A: 2 → 6 → 4 → null  （共 5 步）  (b+a=5)
+     *
+     * p 和 q 同时到达 null，返回 null ✓
+     *
+     * 【时间复杂度】O(a + b)，两个指针各走 a + b 步
+     * 【空间复杂度】O(1)，只用两个指针变量
+     *
+     * 【为什么不用 HashMap？】
+     * HashMap 存 A 的所有节点，再遍历 B 找交集，时间 O(a+b)，空间 O(a)。
+     * 双指针法空间 O(1)，更优。
+     *
+     * 【示例】
+     *   intersectVal=8, listA=[4,1,8,4,5], listB=[5,6,1,8,4,5] → 交点值8
+     *   intersectVal=2, listA=[1,9,1,2,4], listB=[3,2,4]      → 交点值2
+     *   intersectVal=0, listA=[2,6,4], listB=[1,5]            → null
+     */
+    public static ListNode getIntersectionNode(ListNode headA, ListNode headB) {
+        // 边界判断：任一链表为空，不可能相交
+        if (headA == null || headB == null) {
+            return null;
+        }
+
+        // p 指针：从 headA 出发，走到 null 后接力到 headB
+        ListNode p = headA;
+        // q 指针：从 headB 出发，走到 null 后接力到 headA
+        ListNode q = headB;
+
+        // p 和 q 不同时为 null 就继续走
+        // 为什么是 != null 而不是 == null？
+        // 因为 p 走到 null 后会接力到 headB，不会真正变成 null（除非两条链表都为空）
+        // 实际上 p 和 q 一定能在某一步同时到达同一个位置（交点或 null）
+        // 用 while (p != q) 更简洁
+        while (p != q) {
+            // p 走到 A 的尾部后，接力到 B 的头
+            // 如果 p 是 null（走完了 A），就跳到 headB
+            p = (p == null) ? headB : p.next;
+            // q 走到 B 的尾部后，接力到 A 的头
+            q = (q == null) ? headA : q.next;
+        }
+
+        // 此时 p == q，要么是指向交点，要么是同时到了 null（无交点）
+        // 直接返回 p（或 q，它们是同一个引用）
+        return p;
+    }
+
+
+    /**
+     * 表达式解码
+     *
+     * 【题目】
+     * 给定一个字符串 message，包含数字和 @ 或 $ 运算符，
+     * 按照以下规则计算表达式的值：
+     *
+     * 【运算规则】
+     *
+     * ① @ 运算（优先级高，先算）：
+     *    a @ b → 结果 = 2 * a + b + 3
+     *    左右两边的数都替换成这个结果
+     *    例：5 @ 7 → 2*5+7+3 = 20，变成 [20, 20]
+     *
+     * ② $ 运算（优先级低，后算）：
+     *    a $ b → 结果 = 3 * a + 2 * b + 1
+     *    注意：a 是"当前累积的结果"（包含前面所有已算完的），不是单边的数
+     *    例：10 $ 3 → 3*10+2*3+1 = 37
+     *
+     * 多个 $ 时，从左到右依次计算，前一个 $ 的结果作为下一个 $ 的左操作数
+     *
+     * 【执行顺序】
+     * 先算所有 @，再从左到右算所有 $
+     *
+     * 【手动推演】
+     *
+     * "1@2$3"：
+     *   解析：nums=[1, 2, 3], ops=[@, $]
+     *   第①步算 @：1 @ 2 → 2*1+2+3 = 5，nums=[5, 5, 3], ops=[#, $]
+     *   第②步算 $：5 $ 3 → 3*5+2*3+1 = 22
+     *   结果：22
+     *
+     * "10@5$3"：
+     *   解析：nums=[10, 5, 3], ops=[@, $]
+     *   第①步算 @：10 @ 5 → 2*10+5+3 = 28，nums=[28, 28, 3], ops=[#, $]
+     *   第②步算 $：28 $ 3 → 3*28+2*3+1 = 91
+     *   结果：91
+     *
+     * 【时间复杂度】O(n)，n 是字符串长度
+     * 【空间复杂度】O(n)，存数字和运算符
+     */
+    public static int decode(String message) {
+
+        // ============================================================
+        // 第1步：词法分析（解析）
+        // 把字符串拆成"数字列表"和"运算符列表"
+        // 例如 "10@5$3" → nums=[10, 5, 3], ops=[@, $]
+        //
+        // 注意一个数字可能有多位（如 10, 25），
+        // 所以遇到 @ 或 $ 时，把 sb 里累积的数字整体解析
+        // ============================================================
+
+        List<Long> nums = new ArrayList<>();
+        List<Character> ops = new ArrayList<>();
+
+        // StringBuilder 用来累积当前的多位数字
+        StringBuilder sb = new StringBuilder();
+        for (char c : message.toCharArray()) {
+            // 遇到运算符，说明前面的数字结束了
+            if (c == '@' || c == '$') {
+                nums.add(Long.parseLong(sb.toString()));
+                ops.add(c);
+                sb.setLength(0); // 清空 sb，准备读下一个数字
+            } else {
+                // 遇到数字字符，累积起来（支持多位数）
+                sb.append(c);
+            }
+        }
+        // 最后一个数字后面没有运算符，循环结束后手动加入
+        nums.add(Long.parseLong(sb.toString()));
+
+        // ============================================================
+        // 第2步：先算所有 @ 运算
+        //
+        // @ 的规则：a @ b → res = 2*a + b + 3
+        // 左右两边的数都替换成 res
+        //
+        // 为什么先算 @？因为 @ 是"高优先级"，
+        // 而且 @ 是"对称"的（左右都替换），不影响相邻的其他运算
+        //
+        // 算完后把 @ 标记成 '#'（已处理），避免第3步重复处理
+        // ============================================================
+        for (int i = 0; i < ops.size(); i++) {
+            if (ops.get(i) == '@') {
+                // 左边的数 = nums[i]，右边的数 = nums[i+1]
+                long res = 2 * nums.get(i) + nums.get(i + 1) + 3;
+                // 左右两边都替换成结果
+                nums.set(i, res);
+                if (i + 1 < nums.size()) {
+                    nums.set(i + 1, res);
+                }
+                // 标记为 '#'，第3步跳过
+                ops.set(i, '#');
+            }
+        }
+
+        // ============================================================
+        // 第3步：从左到右算所有 $ 运算
+        //
+        // $ 的规则：result $ b → new_result = 3*result + 2*b + 1
+        // 注意：result 是"累积值"，不是 nums[i]
+        // 第一个 $ 的左操作数是 nums[0]（或 @ 算完后 nums[0] 的值）
+        // 后面每个 $ 的左操作数是前一个 $ 的结果
+        //
+        // 例如 [5, 5, 3], ops=[#, $]：
+        //   result = 5（从 nums[0] 开始）
+        //   遇到 $：result = 3*5 + 2*3 + 1 = 22
+        // ============================================================
+
+        // 初始累积值取第一个数（@ 已经算完了，所以已经是 @ 的结果）
+        long result = nums.get(0);
+
+        for (int i = 0; i < ops.size(); i++) {
+            if (ops.get(i) == '$') {
+                // 右操作数是 nums[i+1]
+                // 左操作数是 result（累积值）
+                result = 3 * result + 2 * nums.get(i + 1) + 1;
+            }
+        }
+
+        return (int) result;
+    }
+
+    public static int decodeBrute(String message) {
+        Deque<Long> stack = new ArrayDeque<>();
+
+        StringBuilder sb = new StringBuilder();
+        for (char c : message.toCharArray()) {
+            if (Character.isDigit(c)) {
+                sb.append(c);
+            } else {
+                stack.push(Long.parseLong(sb.toString()));
+                sb.setLength(0);
+
+                long right = stack.pop();
+                long left = stack.pop();
+                long res;
+                if (c == '@') {
+                    res = 2 * left + right + 3;
+                } else {
+                    res = 3 * left + 2 * right + 1;
+                }
+                stack.push(res);
+            }
+        }
+        stack.push(Long.parseLong(sb.toString()));
+
+        return stack.pop().intValue();
     }
 
 }
