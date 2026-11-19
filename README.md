@@ -50,6 +50,8 @@ curl.exe -s "http://localhost:8080/api/tickets?limit=20" -H "X-API-Key: ak-demo-
 
 说明：告警 webhook、人工工单池、指标等运营侧接口位于内部网络边界，不走客户鉴权。
 
+> 注：以下剧本的响应样例录制于 O8 异步化之前（当时 submit 同步返回终稿）。当前 submit/approve/reply 均为**受理即 202**（图执行异步进行），响应体形如 `{"ticketId":"...","status":"PROCESSING","accepted":true,"poll":"/api/tickets/{id}/status","events":"/api/tickets/{id}/events"}`；客户端轮询 `GET /{id}/status` 至 `done=true`，或订阅 `GET /{id}/events`(SSE) 获取终稿。工单终态、时间线与审计行为与样例一致。
+
 ### 剧本 1：咨询 → 知识问答 → 直接结单
 
 请求（`body1.json`）：
@@ -393,16 +395,16 @@ curl.exe -s --noproxy "*" http://localhost:8080/api/tickets/TMW1IC0QD1/messages 
 
 路由：`reply 接口(归属校验/CLOSED 409/ESCALATED 只记录) → 清旧 checkpoint → 对话历史注入 CONVERSATION_HISTORY → 图从头重跑 → 终稿/草稿落线程`。
 
-阶段 4.1 加固（与剧本 6 同一链路，`mvn test` 207 用例全绿）：
+阶段 4.1 加固（与剧本 6 同一链路，`mvn test` 225 用例全绿）：
 
-- **并发串行化（O1）**：reply 按 ticketId 加锁，把「读状态 → 判重 → 清断点 → invoke → 落库收尾」整段串行化；`TicketLockRegistry` 带引用计数，用完即从 map 移除，不随工单号堆积。边界：单机锁只在单进程有效，多实例部署需 `ticket.version` 乐观锁或 Redis 分布式锁。
+- **并发串行化（O1，已由 O8 受理闸门取代）**：初版 reply 按 ticketId 进程内加锁（`TicketLockRegistry` 引用计数）把「读状态 → 判重 → 清断点 → invoke → 落库收尾」整段串行化；O8 异步化后改为 `transitionStatusIf` 单条原子条件 UPDATE（`TicketRepository`），状态闸门即互斥语义——同单并发受理只有一个赢家，天然多实例安全，进程内锁类已删除。
 - **入口幂等（O7）**：`reply` 请求体支持可选 `requestId`（如 `{"message":"...","requestId":"req-001"}`）；同一工单重复提交同号返回 `{"duplicated":true,...}`，不重复落消息、不重复跑图；`ticket_message(ticket_id, client_msg_id)` 唯一约束做多实例兜底。
 - **审批作废留痕（O3）**：`PENDING_APPROVAL` 单被追问时，先读旧 `PENDING_ACTION` 并写审计 `approval-invalidated`，再清断点重跑；审批人手里的旧链接失效可追溯。
 - **短事务 + 失败补偿（O4）**：`TicketRoundService.beginRound/completeRound` 把「消息 + 状态」收敛为短事务；`graph.invoke` 始终在事务外（云调用 + 退避轮询不占 DB 连接）。图异常时补系统说明 + 转人工 + `reply-failed` 审计，客户消息保留作证据，不再出现"有追问、无答复"。
 - **转录按行截断（O5）**：6000 字符预算按整行从尾部累加，不再切半行；仅单行超预算时截断该行并加 `…`。
 - **检索带上文（O6）**：诊断/问答检索 query = 历史尾部 300 字 + 本轮原文，模糊追问（"那怎么办"）仍能召回此前的实例、端口、错误码。
 - **人工完结回线程（O2）**：`HumanTicketPool.resolve` 把专员答复（或默认结单说明）补成线程末条 AGENT 消息，客户侧线程闭环。
-- **异步演进口径（O8，本期未实现）**：当前 submit/reply 同步 `graph.invoke` 占用 HTTP 线程；演进方向是受理即返回 `202` + 轮询/SSE 推送，状态机增加 `PROCESSING`，并需处理超时补偿与同单消息顺序（O1 的单机锁届时改为按工单的消息队列/分布式锁）。
+- **异步受理（O8，已实现）**：submit/reply/approve 受理即返回 `202`（响应体含 `accepted:true` 与 `poll`/`events` 地址，`Location` 头指向轮询端点），图执行移入独立线程池（`dolphin.async.pool-size`），状态机增加 `PROCESSING` 在途态；客户端轮询 `GET /{id}/status`（`done=true` 即本轮有结论）或订阅 `GET /{id}/events`（SSE：连接即推状态快照，本轮完成推 result 事件后关闭）。同单并发由受理闸门原子 UPDATE 串行化（取代 O1 进程内锁，多实例安全）；上一轮 PROCESSING 中拒绝新追问（409）；受理队列满返回 503 并转人工；PROCESSING 卡死由 SLA 响应计时器超时补偿。
 
 ### offline 模式做了什么
 
@@ -584,9 +586,9 @@ bash demo/walkthrough.sh        # 可选 BASE_URL / API_KEY 环境变量
 ### 跟着链路读代码
 
 1. 入口与受理：`TicketController.submit`/`reply`/`approve` → `TicketGraphRunner`
-2. 图定义与节点：`TicketGraphConfig#ticketStateGraph`（节点 94-231，条件边 232-285）
+2. 图定义与节点：`TicketGraphConfig#ticketStateGraph`（节点 93-231，边 233-284）
 3. 轨迹包装：`TicketGraphConfig#traced`（enter/exit/error + cost，200 字截断）
-4. 执行与验证：`ActionExecutor`（基线采样 110 / 验证 134）
+4. 执行与验证：`ActionExecutor`（基线采样 107 / 验证 134）
 5. 审批决策与令牌：`ApprovalService` + `ApprovalTokenService`
 6. 时间线 API：`TicketTimelineController#timeline`
 7. 转人工：`HumanTicketPool` + `HumanTicketController`

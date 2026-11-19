@@ -72,7 +72,7 @@ fi
 
 # ----------------------------------------------------------------------------
 # 第一幕 咨询单:submit → triage → kbAnswer → reply → followup → CLOSED
-#   代码入口: TicketController.submit:109 → TicketGraphConfig triage/kbAnswer 节点:94/127
+#   代码入口: TicketController.submit:109 → TicketGraphConfig triage/kbAnswer 节点:93/126
 #   预期: 202 受理;时间线 nodePath=[triage,kbAnswer,reply,followup],不含诊断/审批/执行
 # ----------------------------------------------------------------------------
 say "第一幕 咨询单:知识问答直达结单"
@@ -83,8 +83,8 @@ show_timeline "$TID"
 
 # ----------------------------------------------------------------------------
 # 第二幕 故障单全闭环:submit → diagnosis → reply → approval(中断)→ execute → followup
-#   代码入口: TicketGraphConfig diagnosis/approval/execute 节点:109/153/170
-#            ActionExecutor 基线采样:110 验证:134 → TicketController.approve:201
+#   代码入口: TicketGraphConfig diagnosis/approval/execute 节点:108/152/169
+#            ActionExecutor 基线采样:107 验证:134 → TicketController.approve:201
 #   预期: 第一段轮询停在 PENDING_APPROVAL(时间线已含 triage/diagnosis/reply);
 #          approve 后续跑,时间线新增 approval→execute→followup 与 :BASELINE/:VERIFY、quality-review
 # ----------------------------------------------------------------------------
