@@ -527,6 +527,50 @@ POST /api/human-tickets/{ticketId}/resolve  # 完结 {"note":"已恢复"} → RE
 
 非法状态迁移（未认领直接完结、重复认领）返回 409；任务不存在返回 404。人工任务已落库（表 `human_task`，P0），重启不丢；TODO: 与真实人工系统对接。
 
+## 双入口：REST API 与聊天入口（Chat Intent Router）
+
+同一套多智能体图有两个前置入口，面向不同调用方：
+
+| | 结构化 REST 入口 | 聊天入口 |
+|---|---|---|
+| 端点 | `/api/tickets/**`（submit/approve/reply/…） | `POST /api/dolphin/chat` |
+| 调用方 | 系统集成 / 工单台账 | 终端用户自然语言对话 |
+| 鉴权 | `X-API-Key`（`ApiKeyAuthFilter` 只拦 `/api/tickets/**`，租户隔离） | 演示入口暂不鉴权（与告警 webhook/人工池同属过滤器边界外） |
+| 会话模型 | 无（工单号即线程） | `sessionId`（缺省 `default`）驱动路由粘性 |
+| 受理方式 | 受理即 202，图异步执行 | 同步跑图后返回（会话多轮天然串行） |
+
+### 聊天链路：消息 → 意图路由 → 能力分发
+
+```bash
+curl.exe -s -X POST http://localhost:8080/api/dolphin/chat -H "Content-Type: application/json" -d '{"sessionId":"s1","message":"帮我提个工单,数据库连不上了"}'
+# → {"reply":"…","capability":"ticket-flow","matchedBy":"REGEX","confidence":0.9}
+```
+
+`ChatController` → `SessionStore.getOrCreate(sessionId)` 取会话上下文 → `IntentRouter.route` 六级降级链（命中即短路，未命中交下一环，便宜→贵）→ `CapabilityRegistry` 分发 Handler。响应携带 `capability/matchedBy/confidence`，可观测"这句话为什么去了那个分支"：
+
+| 级 | 匹配器 | matchedBy | 说明 |
+|---|---|---|---|
+| 0 | `StickySessionMatcher` | STICKY | 会话粘性短路：流程进行中（如待审批）的消息不再重新分类；含显式换话题词则解除粘性交还后续匹配 |
+| 1 | `ExactMatcher` | EXACT | 精确指令 |
+| 2 | `RegexMatcher` | REGEX | 描述符内注册正则（find 语义），置信 0.9 |
+| 3 | `KeywordMatcher` | KEYWORD | 关键词计数，置信 0.6 起步上限 0.9；多能力平局视为不确定，交下一级裁决 |
+| 4 | `LlmIntentClassifier` | LLM | LLM 语义分类，结构化输出 capabilityCode/confidence，低置信或非法 code 一律放弃回落 |
+| 兜底 | `ChatFallbackHandler` | FALLBACK | 通用对话（闲聊/翻译/摘要，委托 `DolphinSupervisor`），路由永不落空 |
+
+能力注册表当前三个能力：`ticket-flow`（故障工单，`TicketFlowHandler`）、知识问答（`RagQaHandler`）、`chat`（通用对话，`ChatFallbackHandler`）。
+
+### 会话粘性审批（聊天驱动的 HITL 闭环）
+
+`TicketFlowHandler` 在会话内实现两段式交互，与 REST `POST /api/tickets/{id}/approve` 等价：
+
+1. **提交**：用户说"帮我重启实例 i-abc123" → 建单同步跑图 → 停在 approval 前 → 回复"工单 T… 诊断完成,存在待审批处置动作[restartInstance:i-abc123]。回复「同意」执行,或调用 POST /api/tickets/T…/approve 审批"，会话记录 `pendingTicketId` 并保持粘性；
+2. **审批**：用户回复"同意/批准/确认/通过/执行"（拒绝话术：拒绝/不同意/驳回/取消）→ 粘性路由直达审批分支 → 决策落 `approval_decision`（approver=`会话:{sessionId}`）+ 审计 `chat-approval` → resume 续跑执行+验证+结单 → 清除粘性，会话回到自由路由；
+3. **粘性期内**：回复其他内容提示"请回复「同意」或「拒绝」，或发送「换个话题」放弃"；显式换话题 → 解除粘性交还路由。
+
+与 REST 入口同款语义：每请求独立编译图（P0）、决策先落 `ApprovalService` 再 resume、结单触发异步质检、时间线全量可回放。
+
+> 边界说明：①六级中前四级为纯规则、不依赖模型，LLM 分类与通用对话兜底依赖真实模型（offline 桩只脚本化工单图四类 Agent 调用，演示建议用规则级话术）；②聊天入口建单走内部渠道（`TicketService.create(message)`，无租户归属），不出现在任何客户的 `/api/tickets` 列表中，时间线/审计/指标全量可查；③生产化需为 chat 入口接入会话级鉴权并建立会话→客户映射。
+
 ## 全链路导览（P1 全链路可见化）
 
 任意一单都可用 `GET /api/tickets/{id}/timeline` 回放完整链路：节点轨迹、执行器基线/验证、审批决策、质检留痕统一按 `audit_log.id` 升序还原（`at` 仅展示——同毫秒事件会并列）。
@@ -593,3 +637,4 @@ bash demo/walkthrough.sh        # 可选 BASE_URL / API_KEY 环境变量
 6. 时间线 API：`TicketTimelineController#timeline`
 7. 转人工：`HumanTicketPool` + `HumanTicketController`
 8. 结单质检：`QualityReviewService`
+9. 聊天入口：`ChatController` → `IntentRouter`（六级降级）→ `CapabilityRegistry` → `TicketFlowHandler`（粘性审批）
