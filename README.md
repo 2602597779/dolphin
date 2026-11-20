@@ -564,10 +564,10 @@ curl.exe -s -X POST http://localhost:8080/api/dolphin/chat -H "Content-Type: app
 `TicketFlowHandler` 在会话内实现两段式交互，与 REST `POST /api/tickets/{id}/approve` 等价：
 
 1. **提交**：用户说"帮我重启实例 i-abc123" → 建单同步跑图 → 停在 approval 前 → 回复"工单 T… 诊断完成,存在待审批处置动作[restartInstance:i-abc123]。回复「同意」执行,或调用 POST /api/tickets/T…/approve 审批"，会话记录 `pendingTicketId` 并保持粘性；
-2. **审批**：用户回复"同意/批准/确认/通过/执行"（拒绝话术：拒绝/不同意/驳回/取消）→ 粘性路由直达审批分支 → 决策落 `approval_decision`（approver=`会话:{sessionId}`）+ 审计 `chat-approval` → resume 续跑执行+验证+结单 → 清除粘性，会话回到自由路由；
+2. **审批**：用户回复"同意/批准/确认/通过/执行"（拒绝话术：拒绝/不同意/驳回/取消）→ 粘性路由直达审批分支 → **受理闸门**（与 REST 同款 `tryTransition` 条件状态翻转：工单已被 REST 审批/已结单/已转人工时，聊天侧输家不落决策、清除粘性并如实告知）→ 决策落 `approval_decision`（approver=`会话:{sessionId}`）+ 审计 `chat-approval` → resume 续跑执行+验证+结单 → 清除粘性，会话回到自由路由；
 3. **粘性期内**：回复其他内容提示"请回复「同意」或「拒绝」，或发送「换个话题」放弃"；显式换话题 → 解除粘性交还路由。
 
-与 REST 入口同款语义：每请求独立编译图（P0）、决策先落 `ApprovalService` 再 resume、结单触发异步质检、时间线全量可回放。
+与 REST 入口同款语义：每请求独立编译图（P0）、审批先过受理闸门（跨渠道双审只有一个赢家）、决策先落 `ApprovalService` 再 resume、结单触发异步质检、失败补偿三步（系统说明入线程 + 转人工 + 审计留痕，聊天失败不石沉大海）、时间线全量可回放。
 
 > 边界说明：①六级中前四级为纯规则、不依赖模型，LLM 分类与通用对话兜底依赖真实模型（offline 桩只脚本化工单图四类 Agent 调用，演示建议用规则级话术）；②聊天入口建单走内部渠道（`TicketService.create(message)`，无租户归属），不出现在任何客户的 `/api/tickets` 列表中，时间线/审计/指标全量可查；③生产化需为 chat 入口接入会话级鉴权并建立会话→客户映射。
 
