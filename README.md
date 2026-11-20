@@ -567,9 +567,9 @@ curl.exe -s -X POST http://localhost:8080/api/dolphin/chat -H "Content-Type: app
 2. **审批**：用户回复"同意/批准/确认/通过/执行"（拒绝话术：拒绝/不同意/驳回/取消）→ 粘性路由直达审批分支 → **受理闸门**（与 REST 同款 `tryTransition` 条件状态翻转：工单已被 REST 审批/已结单/已转人工时，聊天侧输家不落决策、清除粘性并如实告知）→ 决策落 `approval_decision`（approver=`会话:{sessionId}`）+ 审计 `chat-approval` → resume 续跑执行+验证+结单 → 清除粘性，会话回到自由路由；
 3. **粘性期内**：回复其他内容提示"请回复「同意」或「拒绝」，或发送「换个话题」放弃"；显式换话题 → 解除粘性交还路由。
 
-与 REST 入口同款语义：每请求独立编译图（P0）、审批先过受理闸门（跨渠道双审只有一个赢家）、决策先落 `ApprovalService` 再 resume、结单触发异步质检、失败补偿三步（系统说明入线程 + 转人工 + 审计留痕，聊天失败不石沉大海）、时间线全量可回放。
+与 REST 入口同款语义：每请求独立编译图（P0）、审批先过受理闸门（跨渠道双审只有一个赢家）、决策先落 `ApprovalService` 再 resume、结单触发异步质检、失败补偿三步（系统说明入线程 + 转人工 + 审计留痕，聊天失败不石沉大海）、时间线全量留痕（内部直调可回放，客户视角按租户隔离）。
 
-> 边界说明：①六级中前四级为纯规则、不依赖模型，LLM 分类与通用对话兜底依赖真实模型（offline 桩只脚本化工单图四类 Agent 调用，演示建议用规则级话术）；②聊天入口建单走内部渠道（`TicketService.create(message)`，无租户归属），不出现在任何客户的 `/api/tickets` 列表中，时间线/审计/指标全量可查；③生产化需为 chat 入口接入会话级鉴权并建立会话→客户映射。
+> 边界说明：①六级中前四级为纯规则、不依赖模型，LLM 分类与通用对话兜底依赖真实模型（offline 桩只脚本化工单图四类 Agent 调用，演示建议用规则级话术）；②聊天入口建单走内部渠道（`TicketService.create(message)`，无租户归属），不出现在任何客户的 `/api/tickets` 列表与查询中（timeline 对客户 Key 同样 404），链路留痕在审计日志与指标中，内部直调视角可回放时间线；③生产化需为 chat 入口接入会话级鉴权并建立会话→客户映射。
 
 ## 全链路导览（P1 全链路可见化）
 
@@ -613,7 +613,7 @@ curl -s -H "X-API-Key: ak-demo-cust-001" http://localhost:8080/api/tickets/$TID/
 ```
 
 - `phase` 推导：`graph:` → `node`；含 `:BASELINE`/`:VERIFY` → `verify`；`intent-route` → `router`；`quality-review` → `quality`；其余 → `action`。
-- `nodePath` 由 `graph:*:enter` 去重推导；审计为空也返回 200 + 空 events，仅工单不存在返回 404。
+- `nodePath` 由 `graph:*:enter` 去重推导；审计为空也返回 200 + 空 events；工单不存在或非本客户单（租户隔离，不泄露存在性）返回 404。
 - 零 schema 变更：全部复用 `audit_log` / `approval_decision` / `ticket` 既有表，不分页（单工单量级几十行）。
 
 ### 演示剧本

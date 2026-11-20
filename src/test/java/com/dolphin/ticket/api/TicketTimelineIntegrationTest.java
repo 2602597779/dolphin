@@ -1,5 +1,6 @@
 package com.dolphin.ticket.api;
 
+import com.dolphin.ticket.auth.ApiKeyAuthFilter;
 import com.dolphin.ticket.service.TicketService;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -129,6 +130,26 @@ class TicketTimelineIntegrationTest {
         assertThat(bodyEventList(body, "decisions")).isEmpty();
     }
 
+    /**
+     * 场景四:租户隔离——聊天渠道单(customerId=null)与他客户单,客户视角一律 404
+     * (与同路径其他端点同款,不泄露存在性);内部直调(无 request attribute)保持全量可回放。
+     */
+    @Test
+    void timelineHidesTicketsOutsideCustomerScope() {
+        String chatTicket = ticketService.create(RESTART_MESSAGE, null);        // 聊天渠道:无租户归属
+        String otherTicket = ticketService.create(RESTART_MESSAGE, "cust-002"); // 他客户单
+
+        MockHttpServletRequest customerA = new MockHttpServletRequest();
+        customerA.setAttribute(ApiKeyAuthFilter.CUSTOMER_ID_ATTR, "cust-001");
+
+        assertThat(timelineController.timeline(chatTicket, customerA).getStatusCode().value()).isEqualTo(404);
+        assertThat(timelineController.timeline(otherTicket, customerA).getStatusCode().value()).isEqualTo(404);
+
+        // 内部渠道直调(customerId=null 语义)不隔离:聊天单链路留痕仍可回放(运维视角)
+        assertThat(timelineController.timeline(chatTicket, new MockHttpServletRequest())
+                .getStatusCode().value()).isEqualTo(200);
+    }
+
     /** 提交工单(直调传 Mock 请求=内部渠道,不走 HTTP 鉴权),返回工单号 */
     private String submit(String message) {
         ResponseEntity<Map<String, Object>> response = ticketController
@@ -145,9 +166,10 @@ class TicketTimelineIntegrationTest {
         assertThat(response.getStatusCode().value()).isEqualTo(202);
     }
 
-    /** 查询时间线,断言 200 并返回响应体 */
+    /** 查询时间线(直调传 Mock 请求=内部渠道),断言 200 并返回响应体 */
     private Map<String, Object> timeline(String ticketId) {
-        ResponseEntity<Map<String, Object>> response = timelineController.timeline(ticketId);
+        ResponseEntity<Map<String, Object>> response =
+                timelineController.timeline(ticketId, new MockHttpServletRequest());
         assertThat(response.getStatusCode().value()).isEqualTo(200);
         assertThat(response.getBody()).isNotNull();
         return response.getBody();
