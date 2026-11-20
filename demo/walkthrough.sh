@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Dolphin 全链路导览(P1 全链路可见化):六幕演示剧本,offline profile 零外部依赖。
+# Dolphin 全链路导览(P1 全链路可见化):七幕演示剧本,offline profile 零外部依赖。
 #
 # 用法:
 #   终端一: mvn spring-boot:run -Dspring-boot.run.profiles=offline
 #   终端二: bash demo/walkthrough.sh
 #   可选环境变量: BASE_URL(默认 http://localhost:8080)、API_KEY(默认客户A演示 Key)
 #
-# 每一幕统一套路:提交 → 轮询状态 → 打印 GET /api/tickets/{id}/timeline,
+# 前六幕统一套路:提交 → 轮询状态 → 打印 GET /api/tickets/{id}/timeline,
 # 时间线里能看到节点轨迹(graph:<node>:enter|exit)、执行器基线/验证、审批决策与质检留痕。
+# 第七幕走聊天入口(POST /api/dolphin/chat,同步响应无需轮询),演示粘性审批与并发受理闸门。
 # ============================================================================
 set -uo pipefail
 
@@ -33,6 +34,12 @@ submit_ticket() {
 approve_ticket() {
   curl -s -X POST "$BASE_URL/api/tickets/$1/approve" -H "$AUTH" -H "$JSON" \
     -d "$2" > /dev/null
+}
+
+# 聊天入口:sessionId 在请求体(非 header),同步返回 {reply, capability, matchedBy, confidence}
+chat() {
+  curl -s -X POST "$BASE_URL/api/dolphin/chat" -H "$JSON" \
+    -d "{\"sessionId\":\"$1\",\"message\":\"$2\"}" | { command -v python3 > /dev/null 2>&1 && python3 -m json.tool || cat; }
 }
 
 # 轮询状态直到命中期望值;提前进入其他非在途状态则返回失败(不空等)
@@ -156,4 +163,31 @@ sleep 2
 info "GET /api/alert/diagnoses?limit=5:"
 curl -s "$BASE_URL/api/alert/diagnoses?limit=5" -H "$AUTH" | { command -v python3 > /dev/null 2>&1 && python3 -m json.tool || cat; }
 
-say "导览结束:每条工单都可用 GET /api/tickets/{id}/timeline 回放完整链路"
+# ----------------------------------------------------------------------------
+# 第七幕 聊天入口:POST /api/dolphin/chat → 意图路由 → 工单能力 → 会话粘性审批
+#   代码入口: ChatController.chat:46 → IntentRouter 六级降级(STICKY/EXACT/REGEX/KEYWORD/LLM/FALLBACK)
+#            → TicketFlowHandler.handleApprovalReply:120(受理闸门 tryTransition:130,与 REST 同款)
+#   预期: 7.1 建单同步跑图停在审批前(matchedBy=REGEX,回复含"待审批处置动作");
+#         7.2 同会话回复「同意」→ 闸门 → 决策落库 → resume 续跑结单(matchedBy=STICKY);
+#         7.3 并发双发「同意」仅一个赢家,输家收到"已不在待审批状态...未生效"
+# ----------------------------------------------------------------------------
+say "第七幕 聊天入口:自然语言建单 + 会话粘性审批(聊天驱动 HITL)"
+info "7.1 建单:一句话描述故障(命中 REGEX 话术 → ticket-flow,同步跑图停在审批前)"
+chat "demo-chat" "帮我提个工单,ECS 服务器 i-abc123 连不上了,请帮我重启实例恢复"
+
+info "7.2 粘性审批:同会话回复「同意」→ 受理闸门 → 决策落库 → resume 续跑结单"
+chat "demo-chat" "同意"
+
+info "7.3 闸门演示:新会话建单后并发双发「同意」,条件状态翻转保证只有一个赢家"
+chat "demo-gate" "帮我提个工单,ECS 服务器 i-abc123 连不上了,请帮我重启实例恢复" > /dev/null
+GA=$(mktemp)
+GB=$(mktemp)
+chat "demo-gate" "同意" > "$GA" &
+chat "demo-gate" "同意" > "$GB" &
+wait
+info "响应 A:"; cat "$GA"
+info "响应 B:"; cat "$GB"
+rm -f "$GA" "$GB"
+info "说明:一条以「已批准」开头(赢家,决策落库后续跑结单),另一条为「已不在待审批状态...本次回复未生效」(输家,闸门拦截)"
+
+say "导览结束:每条工单都可用 GET /api/tickets/{id}/timeline 回放完整链路(含第七幕聊天工单,如 demo-gate 单)"

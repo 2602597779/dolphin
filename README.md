@@ -618,7 +618,7 @@ curl -s -H "X-API-Key: ak-demo-cust-001" http://localhost:8080/api/tickets/$TID/
 
 ### 演示剧本
 
-`demo/walkthrough.sh` 六幕：咨询单、故障单审批闭环、拒绝单、免审批直执、人工池认领完结、告警链路。每幕头注释标注「链路环节 → 代码入口(file:line) → 预期响应」。offline profile 下零外部依赖：
+`demo/walkthrough.sh` 七幕：咨询单、故障单审批闭环、拒绝单、免审批直执、人工池认领完结、告警链路、聊天粘性审批（第七幕走 `POST /api/dolphin/chat`：一句话建单停在审批前 → 同会话「同意」续跑结单 → 并发双发「同意」演示受理闸门，仅一个赢家）。每幕头注释标注「链路环节 → 代码入口(file:line) → 预期响应」。offline profile 下零外部依赖：
 
 ```bash
 mvn spring-boot:run -Dspring-boot.run.profiles=offline
