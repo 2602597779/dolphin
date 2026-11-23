@@ -5,16 +5,23 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 工单异步执行装配(阶段 O8):图执行线程池。
  *
  * <p>受理即 202 后,图(含 LLM 调用、云 API 轮询验证)全部在该池执行,
- * 不再占用 Servlet 工作线程。池大小由 {@code dolphin.async.pool-size} 控制;
- * 任务队列无界——受理必达(排队中的单同样是 PROCESSING,SLA 响应计时器兜底),
- * 只有进程关闭期的拒绝才走失败补偿(转人工 + 审计)。
+ * 不再占用 Servlet 工作线程。池大小由 {@code dolphin.async.pool-size} 控制
+ * (LLM 调用为 IO 密集,按下游模型服务并发配额定,而非 CPU 核数)。
+ *
+ * <p>任务队列<b>有界</b>({@code dolphin.async.queue-capacity},默认 500):真削峰而非
+ * 无限积压——队列满时新任务被拒绝(AbortPolicy 抛 RejectedExecutionException),
+ * 由 {@link TicketGraphRunner#tryEnqueue} 就地补偿转人工 + 审计,受理方以 503/转人工
+ * 文案应答。取舍:拒绝比静默积压诚实(无界队列=OOM 风险+积压不可见),
+ * "不丢单"底线由补偿保,而非无限排队;排队的单状态为 PROCESSING,由 SLA 巡检兜底。
  *
  * <p>Bean 类型为 {@link ExecutorService}:Spring 关闭容器时自动调用 shutdown(),
  * 已入队任务尽量跑完;尚未开始的工单停留在 PROCESSING,由 SLA 巡检升级人工兜底。
@@ -27,10 +34,16 @@ public class TicketAsyncConfig {
     public ExecutorService ticketGraphExecutor(TicketAsyncProperties properties) {
         AtomicInteger seq = new AtomicInteger();
         int poolSize = Math.max(1, properties.getPoolSize());
-        return Executors.newFixedThreadPool(poolSize, r -> {
-            Thread t = new Thread(r, "ticket-graph-" + seq.incrementAndGet());
-            t.setDaemon(true);
-            return t;
-        });
+        int queueCapacity = Math.max(1, properties.getQueueCapacity());
+        return new ThreadPoolExecutor(poolSize, poolSize,
+                0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(queueCapacity),
+                r -> {
+                    Thread t = new Thread(r, "ticket-graph-" + seq.incrementAndGet());
+                    t.setDaemon(true);
+                    return t;
+                },
+                // 队列满即拒绝(而非调用者线程执行):受理方立即感知背压,由 runner 补偿转人工
+                new ThreadPoolExecutor.AbortPolicy());
     }
 }

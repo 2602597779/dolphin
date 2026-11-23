@@ -15,10 +15,17 @@ public class TicketAsyncProperties {
 
     /**
      * 图执行线程池大小:并发跑图的工单数上限。
-     * 队列无界(受理必达,宁可排队不拒单);排队的单状态为 PROCESSING,
-     * 由 SLA 巡检兜底(响应计时器把 PROCESSING 计入"未响应"口径)。
+     * LLM 调用为 IO 密集,该值应按下游模型服务的并发配额定(建议配额×0.8),而非 CPU 核数。
+     * 排队的单状态为 PROCESSING,由 SLA 巡检兜底(响应计时器把 PROCESSING 计入"未响应"口径)。
      */
     private int poolSize = 4;
+
+    /**
+     * 图执行任务队列容量(有界):超过后新任务被拒绝,走失败补偿转人工——
+     * 拒绝比静默积压诚实(无界队列=OOM 风险+积压不可见);"不丢单"底线由补偿保,
+     * 而非无限排队。默认 500 ≈ 风暴场景(200 单/5 分钟)的充分缓冲。
+     */
+    private int queueCapacity = 500;
 
     /**
      * SSE 连接超时(0=不超时):工单到达终态时服务端主动 complete,
@@ -32,6 +39,14 @@ public class TicketAsyncProperties {
 
     public void setPoolSize(int poolSize) {
         this.poolSize = poolSize;
+    }
+
+    public int getQueueCapacity() {
+        return queueCapacity;
+    }
+
+    public void setQueueCapacity(int queueCapacity) {
+        this.queueCapacity = queueCapacity;
     }
 
     public Duration getSseTimeout() {

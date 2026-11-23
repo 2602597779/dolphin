@@ -537,7 +537,7 @@ POST /api/human-tickets/{ticketId}/resolve  # 完结 {"note":"已恢复"} → RE
 | 调用方 | 系统集成 / 工单台账 | 终端用户自然语言对话 |
 | 鉴权 | `X-API-Key`（`ApiKeyAuthFilter` 只拦 `/api/tickets/**`，租户隔离） | 演示入口暂不鉴权（与告警 webhook/人工池同属过滤器边界外） |
 | 会话模型 | 无（工单号即线程） | `sessionId`（缺省 `default`）驱动路由粘性 |
-| 受理方式 | 受理即 202，图异步执行 | 同步跑图后返回（会话多轮天然串行） |
+| 受理方式 | 受理即 202，图异步执行 | 受理即回（受理落库+粘性预置，图投递同一线程池异步执行），「进展」查询按状态回复 |
 
 ### 聊天链路：消息 → 意图路由 → 能力分发
 
@@ -563,11 +563,11 @@ curl.exe -s -X POST http://localhost:8080/api/dolphin/chat -H "Content-Type: app
 
 `TicketFlowHandler` 在会话内实现两段式交互，与 REST `POST /api/tickets/{id}/approve` 等价：
 
-1. **提交**：用户说"帮我重启实例 i-abc123" → 建单同步跑图 → 停在 approval 前 → 回复"工单 T… 诊断完成,存在待审批处置动作[restartInstance:i-abc123]。回复「同意」执行,或调用 POST /api/tickets/T…/approve 审批"，会话记录 `pendingTicketId` 并保持粘性；
-2. **审批**：用户回复"同意/批准/确认/通过/执行"（拒绝话术：拒绝/不同意/驳回/取消）→ 粘性路由直达审批分支 → **受理闸门**（与 REST 同款 `tryTransition` 条件状态翻转：工单已被 REST 审批/已结单/已转人工时，聊天侧输家不落决策、清除粘性并如实告知）→ 决策落 `approval_decision`（approver=`会话:{sessionId}`）+ 审计 `chat-approval` → resume 续跑执行+验证+结单 → 清除粘性，会话回到自由路由；
-3. **粘性期内**：回复其他内容提示"请回复「同意」或「拒绝」，或发送「换个话题」放弃"；显式换话题 → 解除粘性交还路由。
+1. **提交**：用户说"帮我重启实例 i-abc123" → 受理落库+**粘性乐观预置**（图大概率停在审批前）→ 图投递 `TicketGraphRunner` 异步执行 → 立即回复"已受理工单 T…,正在诊断处理。回复「进展」查询结果;若需审批处置动作,会提示您确认"；图停在 approval 前时粘性已就位，用户回复「同意」直达审批分支；
+2. **审批**：用户回复"同意/批准/确认/通过/执行"（拒绝话术：拒绝/不同意/驳回/取消）→ 粘性路由直达审批分支 → **受理闸门**（与 REST 同款 `tryTransition` 条件状态翻转，同步执行——并发正确性关键：工单已被 REST 审批/已结单/已转人工时，聊天侧输家不落决策、清除粘性并按工单实际状态如实告知）→ 决策落 `approval_decision`（approver=`会话:{sessionId}`）+ 审计 `chat-approval` → resume 投递异步 → 立即回复"已批准,正在执行处置动作,完成后可回复「进展」查询结果"；终态由「进展」查询清除粘性，会话回到自由路由；
+3. **粘性期内其他消息**：按工单实际状态回复（`TicketStatusService.view` 统一口径）——执行中→"正在处理中,请稍候"；待审批→提示待执行动作与「同意/拒绝」话术；已结单→终稿+清除粘性；已转人工→告知+清除粘性；显式换话题 → 解除粘性交还路由。
 
-与 REST 入口同款语义：每请求独立编译图（P0）、审批先过受理闸门（跨渠道双审只有一个赢家）、决策先落 `ApprovalService` 再 resume、结单触发异步质检、失败补偿三步（系统说明入线程 + 转人工 + 审计留痕，聊天失败不石沉大海）、时间线全量留痕（内部直调可回放，客户视角按租户隔离）。
+与 REST 入口同款语义：受理与执行分离（图执行统一投递 `TicketGraphRunner`，聊天与 REST 共用同一线程池与收尾/补偿链路）、审批先过受理闸门（跨渠道双审只有一个赢家，闸门保持同步）、决策先落 `ApprovalService` 再 resume、结单触发异步质检、投递被拒走补偿三步（系统说明入线程 + 转人工 + 审计留痕，聊天失败不石沉大海）、时间线全量留痕（内部直调可回放，客户视角按租户隔离）。
 
 > 边界说明：①六级中前四级为纯规则、不依赖模型，LLM 分类与通用对话兜底依赖真实模型（offline 桩只脚本化工单图四类 Agent 调用，演示建议用规则级话术）；②聊天入口建单走内部渠道（`TicketService.create(message)`，无租户归属），不出现在任何客户的 `/api/tickets` 列表与查询中（timeline 对客户 Key 同样 404），链路留痕在审计日志与指标中，内部直调视角可回放时间线；③生产化需为 chat 入口接入会话级鉴权并建立会话→客户映射。
 
@@ -618,7 +618,7 @@ curl -s -H "X-API-Key: ak-demo-cust-001" http://localhost:8080/api/tickets/$TID/
 
 ### 演示剧本
 
-`demo/walkthrough.sh` 七幕：咨询单、故障单审批闭环、拒绝单、免审批直执、人工池认领完结、告警链路、聊天粘性审批（第七幕走 `POST /api/dolphin/chat`：一句话建单停在审批前 → 同会话「同意」续跑结单 → 并发双发「同意」演示受理闸门，仅一个赢家）。每幕头注释标注「链路环节 → 代码入口(file:line) → 预期响应」。offline profile 下零外部依赖：
+`demo/walkthrough.sh` 七幕：咨询单、故障单审批闭环、拒绝单、免审批直执、人工池认领完结、告警链路、聊天异步受理与粘性审批（第七幕走 `POST /api/dolphin/chat`：一句话建单受理即回 → 同会话「同意」闸门+决策落库后续跑投递异步 → 「进展」查询按状态回复 → 并发双发「同意」演示受理闸门，仅一个赢家）。每幕头注释标注「链路环节 → 代码入口(file:line) → 预期响应」。offline profile 下零外部依赖：
 
 ```bash
 mvn spring-boot:run -Dspring-boot.run.profiles=offline
@@ -637,4 +637,4 @@ bash demo/walkthrough.sh        # 可选 BASE_URL / API_KEY 环境变量
 6. 时间线 API：`TicketTimelineController#timeline`
 7. 转人工：`HumanTicketPool` + `HumanTicketController`
 8. 结单质检：`QualityReviewService`
-9. 聊天入口：`ChatController` → `IntentRouter`（六级降级）→ `CapabilityRegistry` → `TicketFlowHandler`（粘性审批）
+9. 聊天入口：`ChatController` → `IntentRouter`（六级降级）→ `CapabilityRegistry` → `TicketFlowHandler`（异步受理+粘性审批，图执行投递 `TicketGraphRunner`）

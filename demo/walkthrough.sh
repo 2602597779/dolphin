@@ -9,7 +9,7 @@
 #
 # 前六幕统一套路:提交 → 轮询状态 → 打印 GET /api/tickets/{id}/timeline,
 # 时间线里能看到节点轨迹(graph:<node>:enter|exit)、执行器基线/验证、审批决策与质检留痕。
-# 第七幕走聊天入口(POST /api/dolphin/chat,同步响应无需轮询),演示粘性审批与并发受理闸门。
+# 第七幕走聊天入口(POST /api/dolphin/chat,受理即回+「进展」查询),演示异步受理、粘性审批与并发受理闸门。
 # ============================================================================
 set -uo pipefail
 
@@ -164,19 +164,25 @@ info "GET /api/alert/diagnoses?limit=5:"
 curl -s "$BASE_URL/api/alert/diagnoses?limit=5" -H "$AUTH" | { command -v python3 > /dev/null 2>&1 && python3 -m json.tool || cat; }
 
 # ----------------------------------------------------------------------------
-# 第七幕 聊天入口:POST /api/dolphin/chat → 意图路由 → 工单能力 → 会话粘性审批
+# 第七幕 聊天入口:POST /api/dolphin/chat → 意图路由 → 工单能力 → 异步受理 + 粘性审批
 #   代码入口: ChatController.chat:46 → IntentRouter 六级降级(STICKY/EXACT/REGEX/KEYWORD/LLM/FALLBACK)
-#            → TicketFlowHandler.handleApprovalReply:120(受理闸门 tryTransition:130,与 REST 同款)
-#   预期: 7.1 建单同步跑图停在审批前(matchedBy=REGEX,回复含"待审批处置动作");
-#         7.2 同会话回复「同意」→ 闸门 → 决策落库 → resume 续跑结单(matchedBy=STICKY);
-#         7.3 并发双发「同意」仅一个赢家,输家收到"已不在待审批状态...未生效"
+#            → TicketFlowHandler.submitTicket(受理落库+粘性预置,图投递 TicketGraphRunner 异步执行)
+#            → TicketFlowHandler.handleApprovalReply(受理闸门 tryTransition 同步,resume 投递异步)
+#   预期: 7.1 建单受理即回"已受理...正在诊断处理"(matchedBy=REGEX,HTTP 线程不被图执行占住);
+#         7.2 同会话回复「同意」→ 闸门+决策落库(同步) → resume 投递异步,回复"已批准,正在执行"(matchedBy=STICKY);
+#         7.2b 回复「进展」→ 按工单实际状态回复,终态给出结论并清除粘性;
+#         7.3 并发双发「同意」仅一个赢家,输家按实际状态告知(执行中/已完成)
 # ----------------------------------------------------------------------------
-say "第七幕 聊天入口:自然语言建单 + 会话粘性审批(聊天驱动 HITL)"
-info "7.1 建单:一句话描述故障(命中 REGEX 话术 → ticket-flow,同步跑图停在审批前)"
+say "第七幕 聊天入口:自然语言建单 + 异步受理 + 会话粘性审批(聊天驱动 HITL)"
+info "7.1 建单:一句话描述故障(命中 REGEX 话术 → ticket-flow,受理即回,图后台异步执行)"
 chat "demo-chat" "帮我提个工单,ECS 服务器 i-abc123 连不上了,请帮我重启实例恢复"
 
-info "7.2 粘性审批:同会话回复「同意」→ 受理闸门 → 决策落库 → resume 续跑结单"
+info "7.2 粘性审批:同会话回复「同意」→ 受理闸门+决策落库(同步) → resume 投递异步"
 chat "demo-chat" "同意"
+
+info "7.2b 进展查询:稍候后回复「进展」,按实际状态回复(终态给出结论并清除粘性)"
+sleep 8
+chat "demo-chat" "进展"
 
 info "7.3 闸门演示:新会话建单后并发双发「同意」,条件状态翻转保证只有一个赢家"
 chat "demo-gate" "帮我提个工单,ECS 服务器 i-abc123 连不上了,请帮我重启实例恢复" > /dev/null
@@ -188,6 +194,6 @@ wait
 info "响应 A:"; cat "$GA"
 info "响应 B:"; cat "$GB"
 rm -f "$GA" "$GB"
-info "说明:一条以「已批准」开头(赢家,决策落库后续跑结单),另一条为「已不在待审批状态...本次回复未生效」(输家,闸门拦截)"
+info "说明:一条以「已批准」开头(赢家,决策落库后续跑投递异步),另一条为输家(闸门拦截,按实际状态告知:执行中→正在处理中;若赢家已完成→已完成+终稿)"
 
 say "导览结束:REST 工单都可用 GET /api/tickets/{id}/timeline 回放完整链路;聊天工单为内部渠道单,按租户隔离对客户 Key 返回 404,链路留痕在审计日志中(内部直调视角可回放)"
