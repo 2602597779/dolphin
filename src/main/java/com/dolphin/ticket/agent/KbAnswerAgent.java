@@ -1,5 +1,6 @@
 package com.dolphin.ticket.agent;
 
+import com.dolphin.llm.LlmGuard;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
 
@@ -17,8 +18,10 @@ import java.util.Map;
 public class KbAnswerAgent {
 
     private final ChatClient chatClient;
+    private final LlmGuard llmGuard;
 
-    public KbAnswerAgent(ChatClient.Builder chatClientBuilder) {
+    public KbAnswerAgent(ChatClient.Builder chatClientBuilder, LlmGuard llmGuard) {
+        this.llmGuard = llmGuard;
         this.chatClient = chatClientBuilder
                 .defaultSystem(PromptLoader.load("kb-answer.st"))
                 .build();
@@ -36,7 +39,7 @@ public class KbAnswerAgent {
     public String answer(String rawMessage, Map<String, Object> classification,
                          List<String> similarKnowledge, String history) {
         String user = buildUserMessage(rawMessage, classification, similarKnowledge, history);
-        return chatClient.prompt().user(user).call().content();
+        return llmGuard.call(() -> chatClient.prompt().user(user).call().content(), "kb-answer");
     }
 
     /** 构建 user 消息(package 静态,便于单测覆盖拼接分支) */

@@ -1,5 +1,6 @@
 package com.dolphin.ticket.agent;
 
+import com.dolphin.llm.LlmGuard;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
 
@@ -12,8 +13,10 @@ import java.util.Map;
 public class ReplyAgent {
 
     private final ChatClient chatClient;
+    private final LlmGuard llmGuard;
 
-    public ReplyAgent(ChatClient.Builder chatClientBuilder) {
+    public ReplyAgent(ChatClient.Builder chatClientBuilder, LlmGuard llmGuard) {
+        this.llmGuard = llmGuard;
         this.chatClient = chatClientBuilder
                 .defaultSystem(PromptLoader.load("reply.st"))
                 .build();
@@ -36,6 +39,6 @@ public class ReplyAgent {
                         : "\n对话历史(客户此前沟通,回复需承接上下文、勿重复已答复内容):\n" + history)
                 + "\n内部处理内容:\n" + content;
         // TODO: 敏感信息脱敏(实例 ID/金额等按策略打码)
-        return chatClient.prompt().user(user).call().content();
+        return llmGuard.call(() -> chatClient.prompt().user(user).call().content(), "reply-draft");
     }
 }

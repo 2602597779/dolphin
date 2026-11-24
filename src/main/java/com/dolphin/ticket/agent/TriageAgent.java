@@ -1,5 +1,6 @@
 package com.dolphin.ticket.agent;
 
+import com.dolphin.llm.LlmGuard;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -27,8 +28,10 @@ public class TriageAgent {
     }
 
     private final ChatClient chatClient;
+    private final LlmGuard llmGuard;
 
-    public TriageAgent(ChatClient.Builder chatClientBuilder) {
+    public TriageAgent(ChatClient.Builder chatClientBuilder, LlmGuard llmGuard) {
+        this.llmGuard = llmGuard;
         this.chatClient = chatClientBuilder
                 .defaultSystem(PromptLoader.load("triage.st"))
                 .build();
@@ -43,10 +46,10 @@ public class TriageAgent {
     public Map<String, Object> classify(String rawMessage) {
         Classification c = null;
         try {
-            c = chatClient.prompt()
+            c = llmGuard.call(() -> chatClient.prompt()
                     .user(rawMessage)
                     .call()
-                    .entity(Classification.class);
+                    .entity(Classification.class), "triage-classify");
         } catch (Exception e) {
             log.warn("分诊结构化输出失败,尝试行式兜底解析: {}", e.getMessage());
         }
@@ -63,10 +66,10 @@ public class TriageAgent {
     /** 让模型按行输出 产品:/类型:/紧急度: 的兜底调用 */
     private String chatOnce(String rawMessage) {
         try {
-            return chatClient.prompt()
+            return llmGuard.call(() -> chatClient.prompt()
                     .user(rawMessage + "\n\n请严格只输出三行:产品:xxx、类型:xxx、紧急度:xxx")
                     .call()
-                    .content();
+                    .content(), "triage-fallback");
         } catch (Exception e) {
             log.warn("分诊兜底调用也失败,使用默认分类: {}", e.getMessage());
             return "";

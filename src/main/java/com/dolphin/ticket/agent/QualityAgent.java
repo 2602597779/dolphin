@@ -1,5 +1,6 @@
 package com.dolphin.ticket.agent;
 
+import com.dolphin.llm.LlmGuard;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Component;
 
@@ -30,8 +31,10 @@ public class QualityAgent {
     }
 
     private final ChatClient chatClient;
+    private final LlmGuard llmGuard;
 
-    public QualityAgent(ChatClient.Builder chatClientBuilder) {
+    public QualityAgent(ChatClient.Builder chatClientBuilder, LlmGuard llmGuard) {
+        this.llmGuard = llmGuard;
         this.chatClient = chatClientBuilder
                 .defaultSystem(PromptLoader.load("quality.st"))
                 .build();
@@ -46,7 +49,9 @@ public class QualityAgent {
     public Verdict review(String finalReply) {
         String content;
         try {
-            content = chatClient.prompt().user("请审查以下结单终稿:\n" + finalReply).call().content();
+            content = llmGuard.call(
+                    () -> chatClient.prompt().user("请审查以下结单终稿:\n" + finalReply).call().content(),
+                    "quality-review");
         } catch (Exception e) {
             return new Verdict(false, false, "质检 Agent 调用失败: " + e.getMessage());
         }

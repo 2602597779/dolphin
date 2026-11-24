@@ -1,5 +1,6 @@
 package com.dolphin.agent;
 
+import com.dolphin.llm.LlmGuard;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
@@ -13,8 +14,10 @@ import org.springframework.stereotype.Service;
 public class TranslatorAgent {
 
     private final ChatClient client;
+    private final LlmGuard llmGuard;
 
-    public TranslatorAgent(ChatClient.Builder builder) {
+    public TranslatorAgent(ChatClient.Builder builder, LlmGuard llmGuard) {
+        this.llmGuard = llmGuard;
         this.client = builder
                 .defaultSystem("你是专业翻译助手。把用户提供的文本翻译成指定语言,只输出译文,不要解释。")
                 .build();
@@ -24,9 +27,9 @@ public class TranslatorAgent {
     public String translate(
             @ToolParam(description = "需要翻译的原文") String text,
             @ToolParam(description = "目标语言,例如:英文、日文、法文") String language) {
-        return client.prompt()
+        return llmGuard.call(() -> client.prompt()
                 .user("原文:" + text + System.lineSeparator() + "目标语言:" + language)
                 .call()
-                .content();
+                .content(), "translate");
     }
 }

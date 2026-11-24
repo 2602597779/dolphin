@@ -2,6 +2,7 @@ package com.dolphin.router.matcher;
 
 import com.dolphin.capability.CapabilityDescriptor;
 import com.dolphin.capability.CapabilityRegistry;
+import com.dolphin.llm.LlmGuard;
 import com.dolphin.router.DialogContext;
 import com.dolphin.router.IntentMatcher;
 import com.dolphin.router.RouteDecision;
@@ -36,16 +37,19 @@ public class LlmIntentClassifier implements IntentMatcher {
 
     private final ChatClient chat;
     private final CapabilityRegistry registry;
+    private final LlmGuard llmGuard;
 
-    public LlmIntentClassifier(ChatClient.Builder builder, CapabilityRegistry registry) {
+    public LlmIntentClassifier(ChatClient.Builder builder, CapabilityRegistry registry, LlmGuard llmGuard) {
         this.registry = registry;
+        this.llmGuard = llmGuard;
         this.chat = builder.defaultSystem(buildRouterPrompt(registry)).build();
     }
 
     @Override
     public Optional<RouteDecision> match(String message, DialogContext ctx) {
         try {
-            IntentChoice choice = chat.prompt().user(message).call().entity(IntentChoice.class);
+            IntentChoice choice = llmGuard.call(
+                    () -> chat.prompt().user(message).call().entity(IntentChoice.class), "router-llm");
             if (choice == null || choice.capabilityCode() == null) {
                 return Optional.empty();
             }

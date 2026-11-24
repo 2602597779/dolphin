@@ -2,6 +2,7 @@ package com.dolphin.capability.handler;
 
 import com.dolphin.capability.CapabilityDescriptor;
 import com.dolphin.capability.CapabilityHandler;
+import com.dolphin.llm.LlmGuard;
 import com.dolphin.router.DialogContext;
 import com.dolphin.ticket.rag.TicketRetriever;
 import org.springframework.ai.chat.client.ChatClient;
@@ -22,9 +23,11 @@ public class RagQaHandler implements CapabilityHandler {
 
     private final ChatClient chat;
     private final TicketRetriever ticketRetriever;
+    private final LlmGuard llmGuard;
 
-    public RagQaHandler(ChatClient.Builder builder, TicketRetriever ticketRetriever) {
+    public RagQaHandler(ChatClient.Builder builder, TicketRetriever ticketRetriever, LlmGuard llmGuard) {
         this.ticketRetriever = ticketRetriever;
+        this.llmGuard = llmGuard;
         this.chat = builder.defaultSystem("""
                 你是云服务知识问答助手。请严格基于提供的资料回答用户问题,
                 资料中没有的信息要明确说明"资料中未提及",不要编造。
@@ -54,11 +57,11 @@ public class RagQaHandler implements CapabilityHandler {
                 ? "(知识库暂无召回内容)"
                 : String.join("\n---\n", contexts);
         try {
-            String answer = chat.prompt().user("""
+            String answer = llmGuard.call(() -> chat.prompt().user("""
                     已知资料:
                     %s
 
-                    用户问题:%s""".formatted(contextBlock, message)).call().content();
+                    用户问题:%s""".formatted(contextBlock, message)).call().content(), "rag-qa");
             return answer == null ? "知识问答暂时不可用,请稍后再试。" : answer;
         } catch (Exception e) {
             return "知识问答服务暂时不可用(模型调用失败):" + e.getMessage();

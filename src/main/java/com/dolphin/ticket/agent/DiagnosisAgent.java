@@ -1,5 +1,6 @@
 package com.dolphin.ticket.agent;
 
+import com.dolphin.llm.LlmGuard;
 import com.dolphin.ticket.action.ActionProposal;
 import com.dolphin.ticket.action.ActionRegistry;
 import com.dolphin.ticket.tool.DiagnosisTools;
@@ -53,13 +54,16 @@ public class DiagnosisAgent {
 
     private final ChatClient chatClient;
     private final ObjectMapper objectMapper;
+    private final LlmGuard llmGuard;
 
     public DiagnosisAgent(ChatClient.Builder chatClientBuilder,
                           ResourceTools resourceTools,
                           DiagnosisTools diagnosisTools,
                           ActionRegistry actionRegistry,
-                          ObjectMapper objectMapper) {
+                          ObjectMapper objectMapper,
+                          LlmGuard llmGuard) {
         this.objectMapper = objectMapper;
+        this.llmGuard = llmGuard;
         // 白名单动作目录注入系统提示词:注册表是"模型能建议什么"的唯一事实来源
         String whitelist = actionRegistry.descriptors().stream()
                 .map(d -> "- " + d.name() + ":" + d.displayName())
@@ -92,7 +96,7 @@ public class DiagnosisAgent {
         // TODO: 多轮 ReAct 上限控制与工具调用审计聚合
         String content;
         try {
-            content = chatClient.prompt().user(user).call().content();
+            content = llmGuard.call(() -> chatClient.prompt().user(user).call().content(), "diagnosis");
         } catch (Exception e) {
             log.warn("诊断 Agent 调用失败,本单判定为建议不可信(转人工): {}", e.getMessage());
             return new DiagnosisOutcome("", null, true);

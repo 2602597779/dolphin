@@ -1,5 +1,6 @@
 package com.dolphin.agent;
 
+import com.dolphin.llm.LlmGuard;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.stereotype.Service;
 
@@ -11,10 +12,12 @@ import org.springframework.stereotype.Service;
 public class DolphinSupervisor {
 
     private final ChatClient chat;
+    private final LlmGuard llmGuard;
 
     public DolphinSupervisor(ChatClient.Builder builder,
                              TranslatorAgent translator,
-                             SummarizerAgent summarizer) {
+                             SummarizerAgent summarizer,
+                             LlmGuard llmGuard) {
         this.chat = builder
                 .defaultSystem("""
                         你是"小海豚",一个多智能体系统的协调者(Supervisor)。
@@ -25,9 +28,10 @@ public class DolphinSupervisor {
                         不需要工具就能回答的问题,直接回答即可。""")
                 .defaultTools(translator, summarizer)
                 .build();
+        this.llmGuard = llmGuard;
     }
 
     public String chat(String message) {
-        return chat.prompt().user(message).call().content();
+        return llmGuard.call(() -> chat.prompt().user(message).call().content(), "supervisor-chat");
     }
 }
