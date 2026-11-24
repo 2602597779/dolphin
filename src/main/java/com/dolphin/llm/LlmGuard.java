@@ -1,5 +1,9 @@
 package com.dolphin.llm;
 
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.Timer.Sample;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -25,6 +29,14 @@ import java.util.function.Supplier;
  * "结构化输出解析失败"同样生效(模型输出不稳定时重试一次常可自愈);
  * 重试耗尽后原样抛出最后一次异常,由调用方既有降级逻辑兜底
  * (诊断转人工/质检降级/路由降下一级/问答降级文案)。
+ *
+ * <p>指标(Micrometer,Prometheus 端自动转下划线):
+ * <ul>
+ * <li>{@code dolphin_llm_call_seconds_*}:按 action 分桶的调用耗时
+ * (成败都记录,失败耗时也是容量规划的输入);</li>
+ * <li>{@code dolphin_llm_guard_permits}:剩余并发许可(0=配额打满,
+ * 持续为 0 说明下游配额是瓶颈——"天花板在下游"的直接证据)。</li>
+ * </ul>
  */
 @Component
 public class LlmGuard {
@@ -34,18 +46,24 @@ public class LlmGuard {
     private final Semaphore permits;
     private final int maxRetries;
     private final long retryBackoffMs;
+    private final MeterRegistry meterRegistry;
 
-    public LlmGuard(LlmGuardProperties properties) {
+    public LlmGuard(LlmGuardProperties properties, MeterRegistry meterRegistry) {
         this.permits = new Semaphore(Math.max(1, properties.getMaxConcurrency()));
         this.maxRetries = Math.max(0, properties.getMaxRetries());
         this.retryBackoffMs = Math.max(0, properties.getRetryBackoffMs());
+        this.meterRegistry = meterRegistry;
+        // 配额水位 gauge:强引用信号量(bean 单例字段),持续为 0 即下游配额打满
+        Gauge.builder("dolphin.llm.guard.permits", permits, Semaphore::availablePermits)
+                .description("LLM 并发闸剩余许可")
+                .register(meterRegistry);
     }
 
     /**
      * 受保护地执行一次 LLM 调用。
      *
      * @param llmCall 模型调用体(含 prompt 构建与响应解析)
-     * @param action  动作标识,用于日志定位(如 "triage"/"diagnosis"/"router-llm")
+     * @param action  动作标识,用于日志与指标分桶(如 "triage"/"diagnosis"/"router-llm")
      * @param <T>     返回类型(content 为 String,entity 为目标 record)
      * @return 模型调用结果
      * @throws IllegalStateException 等待配额或退避时被中断(恢复中断位后抛出)
@@ -58,9 +76,13 @@ public class LlmGuard {
                 sleepBeforeRetry(action, attempt);
             }
             acquirePermit(action);
+            Sample sample = Timer.start(meterRegistry);
             try {
-                return llmCall.get();
+                T result = llmCall.get();
+                sample.stop(timer(action));
+                return result;
             } catch (RuntimeException e) {
+                sample.stop(timer(action));
                 lastFailure = e;
                 log.warn("LLM 调用失败(动作={}, 第 {}/{} 次尝试): {}",
                         action, attempt + 1, maxRetries + 1, e.getMessage());
@@ -69,6 +91,14 @@ public class LlmGuard {
             }
         }
         throw lastFailure;
+    }
+
+    /** 按 action 分桶的调用耗时(每次尝试都记录,含失败) */
+    private Timer timer(String action) {
+        return Timer.builder("dolphin.llm.call")
+                .tag("action", action)
+                .description("LLM 调用耗时(按动作分桶)")
+                .register(meterRegistry);
     }
 
     /** 每次尝试都重新竞争配额:退避等待期间不占许可 */

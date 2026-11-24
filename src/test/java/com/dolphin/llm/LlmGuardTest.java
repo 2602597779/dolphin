@@ -1,5 +1,6 @@
 package com.dolphin.llm;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -18,17 +19,21 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * LlmGuard 单测:并发封顶、失败重试、退避中断三个核心语义。
+ * LlmGuard 单测:并发封顶、失败重试、退避中断、指标记录四个核心语义。
  * 退避基数在测试里配到毫秒级,避免拖慢回归。
  */
 class LlmGuardTest {
 
     private LlmGuard guard(int maxConcurrency, int maxRetries, long backoffMs) {
+        return guard(maxConcurrency, maxRetries, backoffMs, new SimpleMeterRegistry());
+    }
+
+    private LlmGuard guard(int maxConcurrency, int maxRetries, long backoffMs, SimpleMeterRegistry registry) {
         LlmGuardProperties p = new LlmGuardProperties();
         p.setMaxConcurrency(maxConcurrency);
         p.setMaxRetries(maxRetries);
         p.setRetryBackoffMs(backoffMs);
-        return new LlmGuard(p);
+        return new LlmGuard(p, registry);
     }
 
     @Test
@@ -136,5 +141,23 @@ class LlmGuardTest {
         assertThat(caller.isAlive()).isFalse();
         assertThat(caught.get()).isInstanceOf(IllegalStateException.class);
         assertThat(interruptFlagRestored.get()).isTrue();
+    }
+
+    @Test
+    @DisplayName("指标:按 action 分桶记录耗时(成败都记),配额水位 gauge 反映剩余许可")
+    void recordsTimerPerActionAndPermitsGauge() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        LlmGuard guard = guard(2, 1, 1, registry);
+
+        guard.call(() -> "ok", "triage");
+        assertThatThrownBy(() -> guard.call(() -> { throw new IllegalStateException("boom"); }, "triage"))
+                .isInstanceOf(IllegalStateException.class);
+        guard.call(() -> "ok", "diagnosis");
+
+        // triage:成功 1 次 + 失败重试 2 次 = 3 次尝试全记录;diagnosis:1 次
+        assertThat(registry.get("dolphin.llm.call").tag("action", "triage").timer().count()).isEqualTo(3);
+        assertThat(registry.get("dolphin.llm.call").tag("action", "diagnosis").timer().count()).isEqualTo(1);
+        // 配额水位 gauge:调用结束后许可应全部归还
+        assertThat(registry.get("dolphin.llm.guard.permits").gauge().value()).isEqualTo(2.0);
     }
 }

@@ -571,6 +571,29 @@ curl.exe -s -X POST http://localhost:8080/api/dolphin/chat -H "Content-Type: app
 
 > 边界说明：①六级中前四级为纯规则、不依赖模型，LLM 分类与通用对话兜底依赖真实模型（offline 桩只脚本化工单图四类 Agent 调用，演示建议用规则级话术）；②聊天入口建单走内部渠道（`TicketService.create(message)`，无租户归属），不出现在任何客户的 `/api/tickets` 列表与查询中（timeline 对客户 Key 同样 404），链路留痕在审计日志与指标中，内部直调视角可回放时间线；③生产化需为 chat 入口接入会话级鉴权并建立会话→客户映射。
 
+### LLM 下游保护（LlmGuard）
+
+全系统 11 处模型调用（Supervisor 工具链、路由 L4 分类、工单图四类 Agent、RAG 问答、质检）统一经 `LlmGuard.call(supplier, action)` 进入（`com/dolphin/llm/LlmGuard.java`）：
+
+- **并发封顶**：`Semaphore(maxConcurrency)`，默认 16（`dolphin.llm-guard.max-concurrency`，按下游配额×0.8 预留）——超出部分在调用方线程上排队等待，不占下游配额也不占 HTTP 线程；
+- **失败重试**：默认重试 2 次（共尝试 3 次），线性退避 `retry-backoff-ms × attempt`（默认 500ms 基数）；每次尝试重新竞争许可（退避期间不占配额）；重试耗尽原样抛最后一次异常，由调用方既有降级链路兜底（诊断转人工/质检降级/路由降下一级/问答降级文案），所有 `catch(Exception)` 语义不变；
+- **边界（诚实标注）**：不做调用超时——同步 Supplier 无法被安全中断，请求级超时由 HTTP 客户端层（Spring AI 底层 RestClient）负责。
+
+三件事各管一段：工单线程池削峰（有界队列+拒绝补偿）、LlmGuard 封顶下游并发、受理闸门管正确性——削峰≠提速，消化速率由下游 LLM 配额决定，天花板在下游不在自己代码。
+
+### 可观测性（Micrometer 指标）
+
+`spring-boot-starter-actuator` + `micrometer-registry-prometheus` 已引入，`GET /actuator/prometheus` 暴露 Prometheus 文本格式（`management.endpoints.web.exposure.include=health,prometheus`）：
+
+| 指标（Prometheus 名） | 来源 | 含义 |
+|---|---|---|
+| `dolphin_llm_call_seconds_count/sum/max` | `LlmGuard`（按 action 分桶） | 每次模型尝试的耗时（成败都记录，失败耗时也是容量规划输入） |
+| `dolphin_llm_guard_permits` | `LlmGuard` | LLM 并发闸剩余许可；持续为 0=配额打满（"瓶颈在下游"的直接证据） |
+| `dolphin_graph_queue_depth` | `TicketAsyncConfig` | 图执行队列排队深度；持续增长=消化速率不足 |
+| `dolphin_graph_pool_active` | `TicketAsyncConfig` | 正在跑图的线程数；触顶=并发跑满 |
+
+> 边界说明：指标已落地并经本地 curl 验证，**Prometheus 采集端未搭建**（运维设施，接入只需 scrape 配置指向 `/actuator/prometheus`）；JVM/HTTP 等基础指标由 actuator 自动注册。
+
 ## 全链路导览（P1 全链路可见化）
 
 任意一单都可用 `GET /api/tickets/{id}/timeline` 回放完整链路：节点轨迹、执行器基线/验证、审批决策、质检留痕统一按 `audit_log.id` 升序还原（`at` 仅展示——同毫秒事件会并列）。
@@ -638,3 +661,4 @@ bash demo/walkthrough.sh        # 可选 BASE_URL / API_KEY 环境变量
 7. 转人工：`HumanTicketPool` + `HumanTicketController`
 8. 结单质检：`QualityReviewService`
 9. 聊天入口：`ChatController` → `IntentRouter`（六级降级）→ `CapabilityRegistry` → `TicketFlowHandler`（异步受理+粘性审批，图执行投递 `TicketGraphRunner`）
+10. LLM 下游保护：`LlmGuard`（全系统模型调用统一闸：Semaphore 封顶+线性退避重试+指标，`com/dolphin/llm/`）

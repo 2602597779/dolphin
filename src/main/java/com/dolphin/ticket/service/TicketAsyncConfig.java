@@ -1,5 +1,7 @@
 package com.dolphin.ticket.service;
 
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -23,6 +25,10 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 文案应答。取舍:拒绝比静默积压诚实(无界队列=OOM 风险+积压不可见),
  * "不丢单"底线由补偿保,而非无限排队;排队的单状态为 PROCESSING,由 SLA 巡检兜底。
  *
+ * <p>指标(Micrometer,Prometheus 端自动转下划线):
+ * {@code dolphin_graph_queue_depth}(排队深度,持续增长=消化速率不足)/
+ * {@code dolphin_graph_pool_active}(正在跑图的线程数,触顶=并发跑满)。
+ *
  * <p>Bean 类型为 {@link ExecutorService}:Spring 关闭容器时自动调用 shutdown(),
  * 已入队任务尽量跑完;尚未开始的工单停留在 PROCESSING,由 SLA 巡检升级人工兜底。
  */
@@ -31,11 +37,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class TicketAsyncConfig {
 
     @Bean("ticketGraphExecutor")
-    public ExecutorService ticketGraphExecutor(TicketAsyncProperties properties) {
+    public ExecutorService ticketGraphExecutor(TicketAsyncProperties properties, MeterRegistry meterRegistry) {
         AtomicInteger seq = new AtomicInteger();
         int poolSize = Math.max(1, properties.getPoolSize());
         int queueCapacity = Math.max(1, properties.getQueueCapacity());
-        return new ThreadPoolExecutor(poolSize, poolSize,
+        ThreadPoolExecutor executor = new ThreadPoolExecutor(poolSize, poolSize,
                 0L, TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<>(queueCapacity),
                 r -> {
@@ -45,5 +51,13 @@ public class TicketAsyncConfig {
                 },
                 // 队列满即拒绝(而非调用者线程执行):受理方立即感知背压,由 runner 补偿转人工
                 new ThreadPoolExecutor.AbortPolicy());
+        // 队列/活跃水位 gauge:强引用 executor(bean 单例),采集端未搭先落地供本地验证
+        Gauge.builder("dolphin.graph.queue.depth", executor, e -> e.getQueue().size())
+                .description("工单图执行队列排队深度")
+                .register(meterRegistry);
+        Gauge.builder("dolphin.graph.pool.active", executor, ThreadPoolExecutor::getActiveCount)
+                .description("正在执行工单图的线程数")
+                .register(meterRegistry);
+        return executor;
     }
 }
