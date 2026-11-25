@@ -62,6 +62,22 @@ dolphin:
         product: 模型推理服务
         context-template: "推理服务触发限流,uid={uid},model={model},429 速率超过 0.1 次/秒,请结合配额与服务状态给出诊断。"
 
+  # ---- 通知通道(MQ 语义:缓冲/限速/重试/死信;默认直发,一行切换)----------------
+  # 诚实边界:进程内实现(内存队列+单消费者线程),不是真实消息中间件——
+  # 重启丢未消费消息、不支持多实例分发,这正是生产换 RocketMQ 的理由;
+  # 接口 com.dolphin.notify.NotifySender 已留口,换真实 MQ 只换实现,调用方零改动。
+  notify:
+    # direct=同步直发(既有语义,offline 演示/测试默认) | mq=进程内 MQ 语义
+    channel: ${DOLPHIN_NOTIFY_CHANNEL:direct}
+    # mq 模式缓冲队列容量(有界):满即拒绝(旁路可丢,不阻塞主流程),计数 dolphin.notify.queue.dropped
+    queue-capacity: ${DOLPHIN_NOTIFY_QUEUE_CAPACITY:200}
+    # 消费限速:两条通知最小间隔(毫秒);默认 3000=20 条/分钟,对齐钉钉自定义机器人限流
+    interval-ms: ${DOLPHIN_NOTIFY_INTERVAL_MS:3000}
+    # 单条消息失败重试次数(共尝试 max-retries+1 次),耗尽进死信(计数+WARN 留痕)
+    max-retries: ${DOLPHIN_NOTIFY_MAX_RETRIES:2}
+    # 线性退避基数(毫秒):第 n 次重试前等待 retry-backoff-ms × n
+    retry-backoff-ms: ${DOLPHIN_NOTIFY_RETRY_BACKOFF_MS:1000}
+
   approval:
     # 审批令牌有效期(支持 10m/30s 等简写,缺省 10 分钟)
     token-ttl: ${DOLPHIN_APPROVAL_TOKEN_TTL:10m}

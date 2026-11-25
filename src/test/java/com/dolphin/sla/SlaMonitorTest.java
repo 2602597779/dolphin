@@ -1,6 +1,6 @@
 package com.dolphin.sla;
 
-import com.dolphin.alert.DingTalkNotifier;
+import com.dolphin.notify.NotifySender;
 import com.dolphin.cloud.CloudApiProperties;
 import com.dolphin.ticket.infra.audit.AuditLogEntity;
 import com.dolphin.ticket.infra.audit.AuditLogRepository;
@@ -51,14 +51,14 @@ class SlaMonitorTest {
     @Autowired
     private AuditLogRepository auditLogRepository;
 
-    private DingTalkNotifier notifier;
+    private NotifySender notifier;
     private SlaMonitor monitor;
     private HumanTicketPool pool;
 
     @BeforeEach
     void setUp() {
-        notifier = mock(DingTalkNotifier.class);
-        when(notifier.sendMarkdown(startsWith("[SLA加急]"), contains("P1"))).thenReturn(true);
+        notifier = mock(NotifySender.class);
+        when(notifier.send(startsWith("[SLA加急]"), contains("P1"))).thenReturn(true);
         AuditLogger auditLogger = new AuditLogger(new CloudApiProperties(), auditLogRepository);
         pool = new HumanTicketPool(humanTaskRepository, auditLogger, new TicketService(ticketRepository),
                 mock(ConversationService.class));
@@ -84,7 +84,7 @@ class SlaMonitorTest {
         assertThat(pool.get("t1")).isPresent();
         assertThat(pool.get("t1").orElseThrow().reason()).contains("SLA超时:RESOLVE").contains("P1");
         assertThat(auditRows("sla-breach")).hasSize(1);
-        verify(notifier, times(1)).sendMarkdown(startsWith("[SLA加急]"), contains("t1"));
+        verify(notifier, times(1)).send(startsWith("[SLA加急]"), contains("t1"));
     }
 
     @Test
@@ -146,7 +146,7 @@ class SlaMonitorTest {
 
         // breach 留痕只落一次,加急只发一次,人工池只有一行
         assertThat(auditRows("sla-breach")).hasSize(1);
-        verify(notifier, times(1)).sendMarkdown(startsWith("[SLA加急]"), contains("t5"));
+        verify(notifier, times(1)).send(startsWith("[SLA加急]"), contains("t5"));
         assertThat(humanTaskRepository.findAll()).hasSize(1);
     }
 
@@ -163,7 +163,7 @@ class SlaMonitorTest {
         HumanTicketPool.HumanTask task = pool.get("t6").orElseThrow();
         assertThat(task.status()).isEqualTo(HumanTicketPool.STATUS_CLAIMED);
         assertThat(task.owner()).isEqualTo("专员A");
-        verify(notifier, times(1)).sendMarkdown(startsWith("[SLA加急]"), contains("t6"));
+        verify(notifier, times(1)).send(startsWith("[SLA加急]"), contains("t6"));
     }
 
     @Test

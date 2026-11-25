@@ -1,6 +1,7 @@
 package com.dolphin.alert;
 
 import com.dolphin.alert.repo.AlertDiagnosisRepository;
+import com.dolphin.notify.NotifySender;
 import com.dolphin.ticket.agent.DiagnosisAgent;
 import com.dolphin.ticket.infra.audit.AuditLogger;
 import com.dolphin.ticket.rag.TicketRetriever;
@@ -35,7 +36,7 @@ class AlertDiagnosisServiceTest {
     private final AlertTaskMatcher taskMatcher = mock(AlertTaskMatcher.class);
     private final DiagnosisAgent diagnosisAgent = mock(DiagnosisAgent.class);
     private final TicketRetriever retriever = mock(TicketRetriever.class);
-    private final DingTalkNotifier notifier = mock(DingTalkNotifier.class);
+    private final NotifySender notifier = mock(NotifySender.class);
     private final AuditLogger auditLogger = mock(AuditLogger.class);
     private final Executor directExecutor = Runnable::run;
 
@@ -87,7 +88,7 @@ class AlertDiagnosisServiceTest {
                 new DiagnosisAgent.DiagnosisOutcome("【故障摘要】推理服务 5xx。",
                         com.dolphin.ticket.action.ActionProposal.parse("restartInstance:i-abc123"), false));
         when(notifier.isConfigured()).thenReturn(true);
-        when(notifier.sendMarkdown(anyString(), anyString())).thenReturn(true);
+        when(notifier.send(anyString(), anyString())).thenReturn(true);
 
         assertTrue(service().schedule(alert("ModelHttp5xxRateHigh", "critical")));
 
@@ -103,7 +104,7 @@ class AlertDiagnosisServiceTest {
                 anyString(), eq(Map.of("product", "模型推理服务", "type", "故障", "urgency", "高")),
                 anyString(), eq(""));
         // 通知正文包含报告与人工决策标注
-        Mockito.verify(notifier).sendMarkdown(anyString(), Mockito.contains("仅供人工决策"));
+        Mockito.verify(notifier).send(anyString(), Mockito.contains("仅供人工决策"));
     }
 
     @Test
@@ -130,7 +131,7 @@ class AlertDiagnosisServiceTest {
         when(diagnosisAgent.diagnose(anyString(), any(), anyString(), anyString())).thenReturn(
                 new DiagnosisAgent.DiagnosisOutcome("【故障摘要】限流。", null, false));
         when(notifier.isConfigured()).thenReturn(true);
-        when(notifier.sendMarkdown(anyString(), anyString())).thenReturn(false);
+        when(notifier.send(anyString(), anyString())).thenReturn(false);
 
         assertTrue(service().schedule(alert("ModelThrottled", "warning")));
 

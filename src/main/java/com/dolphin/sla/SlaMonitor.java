@@ -1,6 +1,6 @@
 package com.dolphin.sla;
 
-import com.dolphin.alert.DingTalkNotifier;
+import com.dolphin.notify.NotifySender;
 import com.dolphin.ticket.infra.audit.AuditLogger;
 import com.dolphin.ticket.repo.TicketEntity;
 import com.dolphin.ticket.repo.TicketRepository;
@@ -41,20 +41,20 @@ public class SlaMonitor {
     private final TicketRepository ticketRepository;
     private final HumanTicketPool humanTicketPool;
     private final AuditLogger auditLogger;
-    private final DingTalkNotifier dingTalkNotifier;
+    private final NotifySender notifySender;
     private final SlaProperties properties;
     private final Clock clock;
 
     public SlaMonitor(TicketRepository ticketRepository,
                       HumanTicketPool humanTicketPool,
                       AuditLogger auditLogger,
-                      DingTalkNotifier dingTalkNotifier,
+                      NotifySender notifySender,
                       SlaProperties properties,
                       Clock clock) {
         this.ticketRepository = ticketRepository;
         this.humanTicketPool = humanTicketPool;
         this.auditLogger = auditLogger;
-        this.dingTalkNotifier = dingTalkNotifier;
+        this.notifySender = notifySender;
         this.properties = properties;
         this.clock = clock;
     }
@@ -111,12 +111,13 @@ public class SlaMonitor {
         }
         auditLogger.log(ticketId, "sla-breach", reason + (newlyQueued ? " 已升级人工池" : " 已在人工池,仅加急"));
 
-        // 加急通知:钉钉 markdown;未配置 webhook 时 DingTalkNotifier 自身降级为日志
+        // 加急通知:走通知通道(direct=同步直发 | mq=进程内缓冲+限速+重试);
+        // 未配置 webhook 时下游自身降级为日志,不中断 SLA 处置
         String text = "### [SLA加急] " + reason + "\n\n- 工单号:" + ticketId + "\n- 优先级:"
                 + priority + "\n- 状态:" + ticket.getStatus() + "\n- 原始诉求:"
                 + abbreviate(ticket.getRawMessage(), 60) + "\n\n请尽快认领处理(POST /api/human-tickets/"
                 + ticketId + "/claim)。";
-        boolean notified = dingTalkNotifier.sendMarkdown("[SLA加急] 工单 " + ticketId, text);
+        boolean notified = notifySender.send("[SLA加急] 工单 " + ticketId, text);
         log.warn("[sla] {} ticketId={} priority={} age={}m notified={}",
                 reason, ticketId, priority, minutes(age), notified);
     }

@@ -1,5 +1,6 @@
 package com.dolphin.alert;
 
+import com.dolphin.notify.NotifySender;
 import com.dolphin.ticket.agent.DiagnosisAgent;
 import com.dolphin.ticket.infra.audit.AuditLogger;
 import com.dolphin.ticket.rag.TicketRetriever;
@@ -37,7 +38,7 @@ public class AlertDiagnosisService {
     private final AlertTaskMatcher taskMatcher;
     private final DiagnosisAgent diagnosisAgent;
     private final TicketRetriever ticketRetriever;
-    private final DingTalkNotifier notifier;
+    private final NotifySender notifier;
     private final AlertDiagnosisStore store;
     private final AuditLogger auditLogger;
     private final Executor executor;
@@ -48,7 +49,7 @@ public class AlertDiagnosisService {
     public AlertDiagnosisService(AlertTaskMatcher taskMatcher,
                                  DiagnosisAgent diagnosisAgent,
                                  TicketRetriever ticketRetriever,
-                                 DingTalkNotifier notifier,
+                                 NotifySender notifier,
                                  AlertDiagnosisStore store,
                                  AuditLogger auditLogger) {
         this(taskMatcher, diagnosisAgent, ticketRetriever, notifier, store, auditLogger,
@@ -63,7 +64,7 @@ public class AlertDiagnosisService {
     AlertDiagnosisService(AlertTaskMatcher taskMatcher,
                           DiagnosisAgent diagnosisAgent,
                           TicketRetriever ticketRetriever,
-                          DingTalkNotifier notifier,
+                          NotifySender notifier,
                           AlertDiagnosisStore store,
                           AuditLogger auditLogger,
                           Executor executor) {
@@ -132,9 +133,10 @@ public class AlertDiagnosisService {
             String proposalText = outcome.proposal() == null ? ""
                     : outcome.proposal().toStateString() + "(置信度 " + outcome.proposal().confidence() + ")";
             String notifyText = buildNotifyText(alert, task, outcome, proposalText);
-            boolean sent = notifier.sendMarkdown("Dolphin 告警诊断:" + alert.alertName(), notifyText);
+            // 通知走通道抽象:direct=同步直发,mq=入队即返回(限速/重试/死信由消费者兜住)
+            boolean sent = notifier.send("Dolphin 告警诊断:" + alert.alertName(), notifyText);
             String notifyDetail = notifier.isConfigured()
-                    ? (sent ? "钉钉接收成功" : "钉钉发送失败(见服务端 WARN)")
+                    ? (sent ? "钉钉已提交(直发成功或已入队)" : "钉钉发送失败/入队被拒(见服务端 WARN)")
                     : "未配置钉钉 webhook,降级日志";
 
             store.add(alert.fingerprint(), alert.alertName(), task.getName(),
