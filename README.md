@@ -591,8 +591,38 @@ curl.exe -s -X POST http://localhost:8080/api/dolphin/chat -H "Content-Type: app
 | `dolphin_llm_guard_permits` | `LlmGuard` | LLM 并发闸剩余许可；持续为 0=配额打满（"瓶颈在下游"的直接证据） |
 | `dolphin_graph_queue_depth` | `TicketAsyncConfig` | 图执行队列排队深度；持续增长=消化速率不足 |
 | `dolphin_graph_pool_active` | `TicketAsyncConfig` | 正在跑图的线程数；触顶=并发跑满 |
+| `dolphin_notify_queue_depth` | `MqNotifySender` | 通知队列当前深度；持续 >0 = 通知产出快于限速投递 |
+| `dolphin_notify_queue_dropped_total` | `MqNotifySender` | 队列满被拒的通知条数（拒绝比静默积压诚实） |
+| `dolphin_notify_dead_letter_total` | `MqNotifySender` | 重试耗尽转死信的通知条数 |
 
 > 边界说明：指标已落地并经本地 curl 验证，**Prometheus 采集端未搭建**（运维设施，接入只需 scrape 配置指向 `/actuator/prometheus`）；JVM/HTTP 等基础指标由 actuator 自动注册。
+
+### 通知链路：进程内 MQ 语义（`channel=direct|mq`）
+
+钉钉自定义机器人有 **20 条/分钟**的硬限流，而通知产生点分散在两个生产者（告警诊断 `AlertDiagnosisService`、SLA 加急 `SlaMonitor`）。系统把通知收敛到 `com.dolphin.notify.NotifySender` 接口后面，两种实现按配置切换：
+
+| `dolphin.notify.channel` | 实现 | 语义 |
+|---|---|---|
+| `direct`（默认） | `DirectNotifySender` | 调用方线程同步直发 `DingTalkNotifier.sendMarkdown`；失败/未配置只留日志。与改造前行为完全一致，离线和 240+ 既有用例不受影响 |
+| `mq` | `MqNotifySender` | `send()` 只把消息放入有界队列（`ArrayBlockingQueue`，默认 200）即返回；`notify-consumer` 单线程按 `interval-ms`（默认 3000ms=20 条/分）逐条投递，失败按 `max-retries`（默认 2）线性退避重试，耗尽转死信计数；队列满立即拒绝（返回 `false` + dropped 计数 + WARN） |
+
+要点：
+
+- **不装任何真实中间件**：进程内队列 + 单消费线程模拟 MQ 语义（缓冲 / 限速 / 重试 / 死信），`pom.xml` 零新增依赖，无 broker 进程。
+- **换真实 MQ 只换实现**：生产替换为 RocketMQ 时只需换掉 `MqNotifySender` 的生产/消费两端，`NotifySender` 接口与两个调用方不动（延续 `TicketIdGenerator` 的接口留口范式）。
+- **诚实边界**：进程内队列**重启即清空、不持久化、单实例无跨进程分发**——这正是生产换 RocketMQ 的理由；钉钉未配置时下游只做单次尝试不重试（避免离线空转）。
+- **两个队列两种判断**：工单处置队列不上 MQ（瓶颈在下游 LLM 配额，排队不缩短耗时，拒绝转人工更诚实）；通知链路上 MQ（钉钉 20 条/分是硬限流，缓冲 + 限速 + 重试兑现真实价值）。
+
+```bash
+# 队列模式（默认 direct，不改任何代码，一行参数切换）
+mvn spring-boot:run -Dspring-boot.run.profiles=offline \
+  -Dspring-boot.run.arguments="--server.port=39999 --dolphin.notify.channel=mq"
+# 触发告警后看消费者线程日志与指标：
+#   [dolphin] [notify-consumer] ... 未配置钉钉 webhook,降级日志通知。title=Dolphin 告警诊断:...
+#   dolphin_notify_queue_depth 0.0 / dolphin_notify_queue_dropped_total 0.0 / dolphin_notify_dead_letter_total 0.0
+```
+
+参数（`application.yml` 的 `dolphin.notify` 块，均可环境覆盖）：`channel`(direct) / `queue-capacity`(200) / `interval-ms`(3000) / `max-retries`(2) / `retry-backoff-ms`(1000，线性基数×n)。
 
 ## 全链路导览（P1 全链路可见化）
 

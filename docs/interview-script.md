@@ -39,7 +39,7 @@
 
 ### 收尾（20 秒）
 
-> "项目目前 39 个测试类 240 用例全绿，有 GitHub Actions CI 和 Flyway 版本化迁移；并发链路完成专项改造（受理 34ms、审批 49ms、四项业务指标可观测）。定位是**离线全链路验证 + 真实模型小规模验证**，不是生产系统——但每个工程决策我都有代码和测试可以展开讲。"
+> "项目目前 40 个测试类 249 用例全绿，有 GitHub Actions CI 和 Flyway 版本化迁移；并发链路完成专项改造（受理 34ms、审批 49ms、7 项业务指标可观测）；通知链路还做了进程内 MQ 语义实现（缓冲+限速+重试，对齐钉钉 20 条/分硬限流）。定位是**离线全链路验证 + 真实模型小规模验证**，不是生产系统——但每个工程决策我都有代码和测试可以展开讲。"
 
 ---
 
@@ -111,6 +111,7 @@
 - "为什么不用分布式锁？" → "状态机 + 条件更新就够了，锁是多余的依赖，且多实例部署天然安全（DB 条件更新不依赖进程内状态）。"
 - "队列为什么有界？无界不是吞吐更高吗？" → "无界是假削峰：OOM 风险 + 积压不可见（客户端以为在处理，实际排到天荒地老）。有界+拒绝+补偿才是真削峰。"
 - "削峰之后为什么用户还是觉得慢？" → "削峰≠提速。队列只是把'打不进去的电话'变成'排队等待'，消化速率由下游 LLM 配额封顶——这就是为什么我加了 LlmGuard：并发封顶到配额×0.8，重试带退避，配额水位有指标可看。"
+- "为什么不上 MQ 削峰？" → "判断标准是这段链路的瓶颈是不是'排队能解决'。处置队列的瓶颈在下游 LLM 配额，进 MQ 也只是换个地方排队；通知链路则不同（钉钉 20 条/分硬限流），所以只给通知上了 MQ 语义——**同一系统两个队列两种判断**，详见 3.5。"
 
 ---
 
@@ -173,6 +174,7 @@
 | 工单线程池（有界 500 + AbortPolicy） | **削峰**：把瞬时风暴变成可消化的排队 | 管不了下游配额——队列再深，LLM 就那么快 |
 | LlmGuard（Semaphore 16 + 退避重试） | **封顶下游并发**：所有 Agent 的 LLM 调用共用一个闸 | 管不了正确性——它不知道哪笔审批该谁赢 |
 | 受理闸门（tryTransition 条件 UPDATE，同步） | **正确性**：跨渠道并发审批唯一赢家 | 不能异步化——判定一旦异步，双赢/丢单都可能 |
+| 通知队列（进程内 MQ 语义，仅 `channel=mq`） | **通知限速**：把钉钉 20 条/分硬限流变成缓冲+限速+重试 | 管不了主链路——它是旁路，通知失败不影响工单状态推进与正确性 |
 
 > 一句话："削峰≠提速，天花板在下游 LLM 配额不在自己代码；正确性靠闸门不靠队列。"
 
@@ -203,10 +205,36 @@
 | 聊天建单受理 | 2-3s（同步跑图） | **34ms** | offline 实测 curl 计时 |
 | 粘性审批 | ~5.3s（同步 resume） | **49ms** | 同上 |
 | 并发双发「同意」 | — | 1 赢家 1 输家（输家按实际状态告知） | walkthrough 7.3 并发实测 |
-| 测试 | 225 用例 | **240 用例全绿**（39 类） | `mvn test` 两轮 |
-| 指标端点 | 无 | 4 项业务指标 + actuator 基础指标 | curl /actuator/prometheus |
+| 测试 | 225 用例 | **249 用例全绿**（40 类） | `mvn test` 两轮 |
+| 指标端点 | 无 | **7 项业务指标**（LLM 2 / 图 2 / 通知 3）+ actuator 基础指标 | curl /actuator/prometheus |
 
 > 口径提醒：以上均为 **offline 桩模型**下的链路验证数据（证明架构与正确性，不证明模型智力）；真实模型数据待 `DOLPHIN_API_KEY`。
+
+### 3.5 MQ 专题：同一系统两个队列两种判断（2026-11 完成）
+
+**一句话总纲**："**通知链路上 MQ，处置队列不上 MQ**——判断标准不是'MQ 高级所以上'，而是这段链路的瓶颈能不能靠排队解决。"
+
+**为什么通知链路上 MQ（真价值）**：
+> 钉钉自定义机器人有 **20 条/分钟**硬限流（官方限制，超了直接限流报错）。两个生产者（告警诊断、SLA 加急）都是'有事立刻发'，突发时必然超限。所以把通知收敛到 `NotifySender` 接口后面：`direct`（默认，同步直发，行为与改造前一致）/ `mq`（进程内队列：有界 200 + `notify-consumer` 单线程按 3000ms/条限速 + 失败退避重试 2 次 + 重试耗尽转死信 + 队列满立即拒绝并计数）。这里**缓冲 + 限速 + 重试**三件套是真需求，不是装饰。
+
+**为什么处置队列不上 MQ**：
+> 图执行队列的瓶颈在下游 LLM 配额（LlmGuard 并发 16，单图 2-5s），消息进 MQ 也只是换个地方排队，**总耗时一点不缩短**，还多一个中间件依赖和运维面。当前选择更诚实：有界 500 + AbortPolicy + 拒绝就地补偿转人工——拒绝是**明确告知**，比在 MQ 里静默积压好。
+
+**"你这个 MQ 是真的吗？"（必须诚实）**：
+> "**是进程内 MQ 语义实现，不是真实中间件**。`ArrayBlockingQueue` + 单 daemon 消费线程，pom 零新增依赖、无 broker 进程。它兑现了 MQ 的核心语义——缓冲、限速、重试、死信；但不具备真实 MQ 的两件事：**持久化（重启即清空）和跨进程分发（单实例）**。这正是生产替换 RocketMQ 的理由，也是我把它称为'实现替换'而非'架构升级'的原因。"
+
+**"换真 MQ 要改多少？"**：
+> "只换 `MqNotifySender` 一个类的两端：发端 `send()` 的 offer 换 `rocketMQTemplate.syncSend`，消费端 `consumeLoop()` 换 `@RocketMQMessageListener`，限速/重试/死信交给 broker 与消费重试策略。`NotifySender` 接口、两个调用方（`SlaMonitor` / `AlertDiagnosisService`）、配置开关都不动——这就是抽接口留口的目的。"
+
+**"为什么默认还是 direct？"**：
+> "离线演示、单元测试、以及没有钉钉 webhook 的环境不该为可选优化付复杂度。`channel=direct` 保持改造前的同步语义，既有用例零改动；`DOLPHIN_NOTIFY_CHANNEL=mq` 一行切换。"
+
+**证据**：
+- 接口与实现：`notify/NotifySender.java`、`notify/MqNotifySender.java`、`notify/NotifyConfig.java`（`@ConditionalOnProperty` 按 channel 选 bean）
+- 调用方改造：`sla/SlaMonitor.java`、`alert/AlertDiagnosisService.java`（原依赖 `DingTalkNotifier` → `NotifySender`；`DingTalkNotifier` 本体零改动）
+- 配置：`application.yml` 的 `dolphin.notify` 块（channel/queue-capacity/interval-ms/max-retries/retry-backoff-ms）
+- 实测（offline，`--dolphin.notify.channel=mq`，2026-11-25）：告警 webhook → 异步诊断 → `[notify-consumer]` 线程投递降级日志；同一次运行里 SLA 加急通知同样由 `notify-consumer` 投递（两个生产者都被队列接管）；`dolphin_notify_queue_depth` / `_queue_dropped_total` / `_dead_letter_total` 在 `/actuator/prometheus` 可见
+- 测试：`notify/MqNotifySenderTest.java` 9 用例（顺序投递/限速间隔/重试后成功/重试耗尽进死信/未配置不重试/队列满拒绝/shutdown 停线程/channel 选 bean）
 
 ---
 
@@ -214,13 +242,14 @@
 
 | 指标 | 数值 | 来源与口径 | 可信度标注 |
 |---|---|---|---|
-| 测试用例 | 39 类 240 用例全绿 | `mvn test` 实测（2026-11-24，两轮） | ✅ 已验证 |
-| CI | 历史全绿（run 42183646528）；2026-11-23 后三笔推送（c83ae2a/8c9979b/0150598）CI 状态未回读 | GitHub Actions（api.github.com 网络受限，需外部环境确认） | ⚠️ 部分未验证 |
+| 测试用例 | 40 类 249 用例全绿 | `mvn test` 实测（2026-11-25） | ✅ 已验证 |
+| CI | 历史全绿（run 42183646528）；2026-11-23 后多笔推送（c83ae2a/8c9979b/0150598/90b7740/b45ca67）CI 状态未回读 | GitHub Actions（api.github.com 网络受限，需外部环境确认） | ⚠️ 部分未验证 |
 | 迁移路径 | 空库/存量库/幂等 三路径通过 | PLAN.md 阶段 8 记录 | ✅ 已验证 |
 | 聊天受理延迟 | 34ms（原同步 2-3s） | offline 实测 curl 计时（2026-11-24） | ✅ 已验证（offline 口径） |
 | 聊天审批延迟 | 49ms（原同步 ~5.3s） | 同上 | ✅ 已验证（offline 口径） |
 | 并发闸门 | 双发「同意」1 赢家 1 输家 | walkthrough 7.3 并发实测 | ✅ 已验证（offline 口径） |
-| 业务指标 | 4 项经 /actuator/prometheus 暴露 | curl 实测（2026-11-24） | ✅ 已验证 |
+| 业务指标 | 7 项经 /actuator/prometheus 暴露（LLM 2 / 图 2 / 通知 3） | curl 实测（2026-11-25） | ✅ 已验证 |
+| 通知链路 MQ（offline） | 告警诊断 + SLA 加急两条通知均由 `notify-consumer` 单线程投递；3 个 notify 指标可见 | offline `--dolphin.notify.channel=mq` 实测（2026-11-25） | ✅ 已验证（offline 口径） |
 | 自动化结单率 | 80%（4/5） | 离线桩模型 + 5 单剧本 | ⚠️ 标注 offline |
 | 审批触发率 | 20%（1/5） | 同上 | ⚠️ 标注 offline |
 | 质检通过率 | 5/5 PASS | 同上 | ⚠️ 标注 offline |
@@ -238,7 +267,8 @@
 3. ❌ 不贬低其他框架（"LangChain 太黑盒"这类话不说，说"选型权衡"）
 4. ❌ 不主动提 LeetcodeTest.java（那是刷题，与项目无关，被问就承认）
 5. ✅ 所有结论必须能落到 `file:line` 或 README 剧本
-6. ✅ 并发数据只说 offline 口径实测值（34ms/49ms/240 用例），不外推生产压测数字
+6. ✅ 并发数据只说 offline 口径实测值（34ms/49ms/249 用例），不外推生产压测数字
+7. ✅ MQ 只说"进程内 MQ 语义实现"，不说"用了 RocketMQ/真消息队列"；被问持久化/多实例分发就承认短板，并说明生产替换为 RocketMQ 属实现替换
 
 ## 六、待办（面试前完成）
 
