@@ -26,20 +26,26 @@ fail() { printf '\033[31m  %s\033[0m\n' "$*"; }
 # 从单行 JSON 提取首个字符串字段(不依赖 jq;值内不含转义引号即可)
 str_field() { sed -n "s/.*\"$1\":\"\\([^\"]*\\)\".*/\\1/p" | head -n 1; }
 
+# 请求体一律经 stdin 传(--data-binary @-),不用 -d 走命令行参数:
+# Git Bash(MSYS) 调用原生 Windows curl 时,argv 里的非 ASCII 会按系统代码页(CP936)转换,
+# 中文 JSON 体会被压坏导致服务端 UTF-8 解析失败返回 400;stdin 则原样透传字节。
+# 该写法在 Linux/macOS 同样成立,属于可移植写法。
 submit_ticket() {
-  curl -s -X POST "$BASE_URL/api/tickets/submit" -H "$AUTH" -H "$JSON" \
-    -d "{\"message\":\"$1\"}" | str_field ticketId
+  printf '{"message":"%s"}' "$1" \
+    | curl -s -X POST "$BASE_URL/api/tickets/submit" -H "$AUTH" -H "$JSON" --data-binary @- \
+    | str_field ticketId
 }
 
 approve_ticket() {
-  curl -s -X POST "$BASE_URL/api/tickets/$1/approve" -H "$AUTH" -H "$JSON" \
-    -d "$2" > /dev/null
+  printf '%s' "$2" \
+    | curl -s -X POST "$BASE_URL/api/tickets/$1/approve" -H "$AUTH" -H "$JSON" --data-binary @- > /dev/null
 }
 
 # 聊天入口:sessionId 在请求体(非 header),同步返回 {reply, capability, matchedBy, confidence}
 chat() {
-  curl -s -X POST "$BASE_URL/api/dolphin/chat" -H "$JSON" \
-    -d "{\"sessionId\":\"$1\",\"message\":\"$2\"}" | { command -v python3 > /dev/null 2>&1 && python3 -m json.tool || cat; }
+  printf '{"sessionId":"%s","message":"%s"}' "$1" "$2" \
+    | curl -s -X POST "$BASE_URL/api/dolphin/chat" -H "$JSON" --data-binary @- \
+    | { command -v python3 > /dev/null 2>&1 && python3 -m json.tool || cat; }
 }
 
 # 轮询状态直到命中期望值;提前进入其他非在途状态则返回失败(不空等)
@@ -71,11 +77,18 @@ show_timeline() {
   fi
 }
 
-# 服务可用性检查(401=Key 不对,000=没启动)
-if [ "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" "$BASE_URL/api/tickets?limit=1")" != "200" ]; then
-  fail "服务不可用或 API Key 无效: $BASE_URL(先按 offline profile 启动,并检查 API_KEY)"
+# 服务可用性检查:必须返回 200 且响应体是工单 JSON(含 "tickets")。
+# 只判 200 会把「同端口上的其他 Web 服务」误判为可用(例如任意路径都回 200 + SPA HTML 的桌面端),
+# 随后所有 JSON 解析静默失败、状态轮询空转超时,排查成本极高。
+health_body=$(curl -s -H "$AUTH" "$BASE_URL/api/tickets?limit=1")
+if [ "$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" "$BASE_URL/api/tickets?limit=1")" != "200" ] \
+   || ! printf '%s' "$health_body" | grep -q '"tickets"'; then
+  fail "服务不可用或响应非工单 JSON: $BASE_URL"
+  fail "  实际响应: $(printf '%s' "$health_body" | head -c 120)"
+  fail "  排查: 先按 offline profile 启动 Dolphin(默认 8080 常被其他程序占用,建议 BASE_URL=http://localhost:39999),并检查 API_KEY"
   exit 1
 fi
+info "服务就绪: $BASE_URL(响应体含 tickets 字段)"
 
 # ----------------------------------------------------------------------------
 # 第一幕 咨询单:submit → triage → kbAnswer → reply → followup → CLOSED
@@ -142,11 +155,11 @@ say "第五幕 人工池:认领并完结第三幕的转人工工单"
 info "WAITING 列表:"
 curl -s "$BASE_URL/api/human-tickets?status=WAITING" -H "$AUTH" | { command -v python3 > /dev/null 2>&1 && python3 -m json.tool || cat; }
 info "claim $TID3"
-curl -s -X POST "$BASE_URL/api/human-tickets/$TID3/claim" -H "$AUTH" -H "$JSON" \
-  -d '{"owner":"demo-agent"}' | { command -v python3 > /dev/null 2>&1 && python3 -m json.tool || cat; }
+printf '%s' '{"owner":"demo-agent"}' | curl -s -X POST "$BASE_URL/api/human-tickets/$TID3/claim" -H "$AUTH" -H "$JSON" \
+  --data-binary @- | { command -v python3 > /dev/null 2>&1 && python3 -m json.tool || cat; }
 info "resolve $TID3"
-curl -s -X POST "$BASE_URL/api/human-tickets/$TID3/resolve" -H "$AUTH" -H "$JSON" \
-  -d '{"note":"演示:人工恢复实例连接"}' | { command -v python3 > /dev/null 2>&1 && python3 -m json.tool || cat; }
+printf '%s' '{"note":"演示:人工恢复实例连接"}' | curl -s -X POST "$BASE_URL/api/human-tickets/$TID3/resolve" -H "$AUTH" -H "$JSON" \
+  --data-binary @- | { command -v python3 > /dev/null 2>&1 && python3 -m json.tool || cat; }
 info "工单 $TID3 当前状态:"
 curl -s -H "$AUTH" "$BASE_URL/api/tickets/$TID3/status" | str_field status
 
@@ -156,9 +169,17 @@ curl -s -H "$AUTH" "$BASE_URL/api/tickets/$TID3/status" | str_field status
 #   预期: accepted=1、diagnosisScheduled=1;diagnoses 列表出现本条告警的诊断报告
 # ----------------------------------------------------------------------------
 say "第六幕 告警链路:webhook 受理 → 异步诊断"
-curl -s -X POST "$BASE_URL/api/alert/webhook" -H "$JSON" -d '{
-  "alerts": [{"status":"firing","labels":{"alertname":"ModelHttp5xxRateHigh","uid":"u-demo","model":"qwen-plus","severity":"critical"},"annotations":{"summary":"模型 5xx 错误率突增"}}]
-}' | { command -v python3 > /dev/null 2>&1 && python3 -m json.tool || cat; }
+# fingerprint 是告警去重键,也是 AlertEventEntity 的主键来源(手工赋值):payload 必须携带,
+# 否则 persist 时主键为 null 会直接 500。这里每次运行取唯一值,保证受理数恒为 1(而非 duplicate)。
+FP="fp-walkthrough-$(date +%s)"
+info "fingerprint=$FP"
+printf '{
+  "version": "4",
+  "status": "firing",
+  "alerts": [{"status":"firing","fingerprint":"%s","startsAt":"%s","endsAt":"0001-01-01T00:00:00Z","labels":{"alertname":"ModelHttp5xxRateHigh","uid":"u-demo","model":"qwen-plus","severity":"critical"},"annotations":{"summary":"模型 5xx 错误率突增"}}]
+}' "$FP" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  | curl -s -X POST "$BASE_URL/api/alert/webhook" -H "$JSON" --data-binary @- \
+  | { command -v python3 > /dev/null 2>&1 && python3 -m json.tool || cat; }
 sleep 2
 info "GET /api/alert/diagnoses?limit=5:"
 curl -s "$BASE_URL/api/alert/diagnoses?limit=5" -H "$AUTH" | { command -v python3 > /dev/null 2>&1 && python3 -m json.tool || cat; }

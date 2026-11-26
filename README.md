@@ -624,6 +624,8 @@ mvn spring-boot:run -Dspring-boot.run.profiles=offline \
 
 参数（`application.yml` 的 `dolphin.notify` 块，均可环境覆盖）：`channel`(direct) / `queue-capacity`(200) / `interval-ms`(3000) / `max-retries`(2) / `retry-backoff-ms`(1000，线性基数×n)。
 
+> 回归口径：默认 `direct` 通道下 `demo/walkthrough.sh` 七幕全通（含第六幕 webhook → 异步诊断），通知改造对主流程零回归；`mq` 通道只替换通知投递实现，工单状态迁移与 `timeline` 完全一致。
+
 ## 全链路导览（P1 全链路可见化）
 
 任意一单都可用 `GET /api/tickets/{id}/timeline` 回放完整链路：节点轨迹、执行器基线/验证、审批决策、质检留痕统一按 `audit_log.id` 升序还原（`at` 仅展示——同毫秒事件会并列）。
@@ -677,6 +679,8 @@ curl -s -H "X-API-Key: ak-demo-cust-001" http://localhost:8080/api/tickets/$TID/
 mvn spring-boot:run -Dspring-boot.run.profiles=offline
 bash demo/walkthrough.sh        # 可选 BASE_URL / API_KEY 环境变量
 ```
+
+> 端口与编码提示：脚本默认 `BASE_URL=http://localhost:8080`。若 8080 已被其他程序占用（同端口也会回 200，但响应不是工单 JSON），脚本的启动检查会直接失败并打印实际响应体，此时用 `BASE_URL=http://localhost:39999 bash demo/walkthrough.sh` 覆盖。脚本所有请求体经 stdin（`--data-binary @-`）传递——Git Bash 调用原生 curl 时命令行参数中的中文会按系统代码页转换，走 stdin 可避免请求体被破坏。
 
 > offline 桩分诊只产出 故障/咨询，无法复现「高危/超范围」直达转人工；真实模型下该分支同样以 `nodePath` 终点 `escalateHuman` 呈现，剧本第四幕以「免审批直执」覆盖 autoExecute 分支。
 
