@@ -1,5 +1,6 @@
 package com.dolphin.metrics;
 
+import com.dolphin.cluster.LocalTicketIdGenerator;
 import com.dolphin.ticket.infra.audit.AuditLogEntity;
 import com.dolphin.ticket.infra.audit.AuditLogRepository;
 import com.dolphin.ticket.repo.ApprovalDecisionRepository;
@@ -187,7 +188,7 @@ class MetricsServiceTest {
 
     @Test
     void updateStatusStampsClosedAtAndClearsOnReopen() throws InterruptedException {
-        TicketService ticketService = new TicketService(ticketRepository);
+        TicketService ticketService = new TicketService(ticketRepository, new LocalTicketIdGenerator());
         String id = ticketService.create("指标时间戳验证工单", "cust-001");
 
         // 结单 → 落 closed_at 戳;重复置 CLOSED 保持首戳

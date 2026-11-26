@@ -78,6 +78,21 @@ public interface TicketRepository extends JpaRepository<TicketEntity, String> {
     /** 未闭环且从未 SLA 超时留痕的工单(SlaMonitor 周期扫描的输入,幂等保证) */
     List<TicketEntity> findByStatusNotAndSlaBreachAtIsNull(String status);
 
+    /**
+     * SLA 超时处置权抢占 + 留痕(原子条件更新,P0 多实例防重)。
+     *
+     * <p>把原来"SlaMonitor 读-改-写(setSlaBreachAt + save)"换成单条 UPDATE:
+     * 只有把 {@code sla_breach_at} 从 NULL 改成非 NULL 的事务能影响 1 行,并发节点其余全部 0 行。
+     * 数据库行级原子性天然跨实例成立,因此多实例巡检同一张超时单时只有一个赢家,
+     * 重复升级/重复加急在 SQL 层被挡住(无需分布式锁)。
+     *
+     * @return 受影响行数:1=抢占成功(本次由我处置),0=已被他人抢占/工单不存在
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("update TicketEntity t set t.slaBreachAt = :at, t.updatedAt = :at"
+            + " where t.id = :id and t.slaBreachAt is null")
+    int claimSlaBreach(@Param("id") String id, @Param("at") Instant at);
+
     // ---- 阶段 O8:异步受理闸门 ----
 
     /**

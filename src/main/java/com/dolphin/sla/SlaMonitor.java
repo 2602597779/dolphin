@@ -1,5 +1,6 @@
 package com.dolphin.sla;
 
+import com.dolphin.cluster.SlaBreachGuard;
 import com.dolphin.notify.NotifySender;
 import com.dolphin.ticket.infra.audit.AuditLogger;
 import com.dolphin.ticket.repo.TicketEntity;
@@ -26,9 +27,13 @@ import java.util.List;
  *   <li><b>解决超时</b>:未 CLOSED(含 PENDING_APPROVAL/ESCALATED)超过解决时限。</li>
  * </ul>
  *
- * <p>超时动作(一次性,幂等):落 {@code ticket.sla_breach_at} 留痕 → 未在人工池则入队 →
+ * <p>超时动作(一次性,幂等):抢占超时处置权并落 {@code ticket.sla_breach_at} 留痕 → 未在人工池则入队 →
  * 审计 {@code sla-breach} → 钉钉加急(webhook 未配置自动降级审计日志,不中断流程)。
  * 已留痕的工单后续扫描直接跳过,避免重复入队/重复加急刷屏。
+ *
+ * <p>多实例口径(P0):幂等不再依赖"进程内读-改-写",而是由
+ * {@link SlaBreachGuard} 做原子抢占(默认条件 UPDATE),多节点同时巡检同一张超时单
+ * 也只有抢占成功的那一个节点执行入池/审计/通知。
  *
  * <p>实现细节:不改写工单状态——审批中断的单仍可正常 approve 续跑结单,
  * SLA 升级是"拉人兜底"而非"改判流程",人工池完结(resolve)会把工单转 CLOSED。
@@ -45,17 +50,26 @@ public class SlaMonitor {
     private final SlaProperties properties;
     private final Clock clock;
 
+    /**
+     * 超时处置权守卫(P0 多实例就绪:从"读-改-写"改为原子抢占)。
+     * 默认 {@link com.dolphin.cluster.DbSlaBreachGuard}(条件 UPDATE),
+     * 多实例下同一张超时单只会有一个节点抢占成功。
+     */
+    private final SlaBreachGuard breachGuard;
+
     public SlaMonitor(TicketRepository ticketRepository,
                       HumanTicketPool humanTicketPool,
                       AuditLogger auditLogger,
                       NotifySender notifySender,
                       SlaProperties properties,
+                      SlaBreachGuard breachGuard,
                       Clock clock) {
         this.ticketRepository = ticketRepository;
         this.humanTicketPool = humanTicketPool;
         this.auditLogger = auditLogger;
         this.notifySender = notifySender;
         this.properties = properties;
+        this.breachGuard = breachGuard;
         this.clock = clock;
     }
 
@@ -95,12 +109,16 @@ public class SlaMonitor {
         return null;
     }
 
-    /** 超时动作:留痕 + 入队(若未在池) + 审计 + 加急通知 */
+    /** 超时动作:抢占处置权(留痕) + 入队(若未在池) + 审计 + 加急通知 */
     private void breach(TicketEntity ticket, String priority, Duration age, String level, Instant now) {
         String ticketId = ticket.getId();
-        ticket.setSlaBreachAt(now);
-        ticket.setUpdatedAt(now);
-        ticketRepository.save(ticket);
+        // 多实例防重:抢占 + 留痕是同一个原子动作(条件 UPDATE where sla_breach_at is null)。
+        // 抢不到说明别的节点(或上一轮巡检)已经处置过这张单,直接跳过全部副作用:
+        // 不重复入人工池、不重复审计、不重复加急——这正是单实例靠"内存幂等"做不到的地方。
+        if (!breachGuard.claim(ticketId, now)) {
+            log.debug("[sla] 超时处置权已被抢占,跳过 ticketId={} level={}", ticketId, level);
+            return;
+        }
 
         String reason = "SLA超时:" + level + "(优先级" + priority + ",已耗时" + minutes(age)
                 + "分钟,时限" + minutes(limitOf(level, priority)) + "分钟)";

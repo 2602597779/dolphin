@@ -53,6 +53,8 @@ public class ChatController {
         // 粘性由流程型能力自行管理(如工单等待审批时保持、结单后清除),入口不越权设置
 
         String reply = handler.handle(message, ctx);
+        // 会话写回:进程内实现是空操作(对象就地生效),外部化实现借此持久化粘性/待审批状态
+        sessionStore.save(ctx);
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("reply", reply);

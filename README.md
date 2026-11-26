@@ -626,6 +626,54 @@ mvn spring-boot:run -Dspring-boot.run.profiles=offline \
 
 > 回归口径：默认 `direct` 通道下 `demo/walkthrough.sh` 七幕全通（含第六幕 webhook → 异步诊断），通知改造对主流程零回归；`mq` 通道只替换通知投递实现，工单状态迁移与 `timeline` 完全一致。
 
+### 多实例就绪：四处接口留口（`com.dolphin.cluster`）
+
+单机跑得很好，但横向扩到多实例时，有四处**进程内状态**会出问题：两个实例各自发号可能撞号、SLA 巡检会重复处置同一张单、会话状态只活在进程内存里、任务队列只在自己进程内。本项目没有引入真实中间件，而是沿用 `NotifySender` 的同一范式——**接口 + 默认进程内实现 + 配置切换**——把这四处抽出来；将来接 Redis / 号段服务 / MQ 时只换实现类，调用方一行不动。
+
+| 位置 | 接口 | 默认实现（单机） | 多实例时要换什么 |
+|---|---|---|---|
+| 发号器 | `TicketIdGenerator.next()` | `LocalTicketIdGenerator`：`T` + 时间戳 36 进制 + 进程内自增（**逐字节等同改造前**） | 换 Redis `INCR` / 号段服务；或切 `WorkerTicketIdGenerator`（`T` + 相对 2020-01-01 的毫秒 36 进制 + workerId + 序号，workerId 0~1023，越界直接抛错） |
+| SLA 防重 | `SlaBreachGuard.claim(ticketId, at)` | `DbSlaBreachGuard`：条件更新 `set slaBreachAt where id=? and slaBreachAt is null`，返回是否抢到处置权 | **本身已多实例安全**（DB 条件更新即互斥）；留接口是为了能换 Redis `SETNX` 或别的存储 |
+| 会话存储 | `SessionStore`（`getOrCreate` / `save` / `evictExpired` / `size`） | `LocalSessionStore`：`ConcurrentHashMap` + TTL 惰性清理 | 换 Redis Hash；契约是「`getOrCreate` 取对象 → 调用方就地改 → `save(ctx)` 写回」，进程内实现的 `save` 是空操作，外置实现必须真持久化 |
+| 任务队列 | `TicketTaskQueue.submit(Runnable)` | `LocalTicketTaskQueue`：委托既有 `ticketGraphExecutor`；队列满或执行器已关闭返回 `false` | 换 MQ 生产者（提交即返回）；`false` 时调用方就地补偿转人工——这条补偿路径改造前就存在，**拒绝文案改为稳定串**「任务队列背压拒绝(队列已满或执行器已关闭)」，细节留 WARN 日志 |
+
+配置（`application.yml` 的 `dolphin.cluster` 块，均可环境覆盖）：
+
+```yaml
+dolphin:
+  cluster:
+    ticket-id:
+      strategy: ${DOLPHIN_CLUSTER_TICKET_ID_STRATEGY:local}   # local（默认）| worker
+      worker-id: ${DOLPHIN_CLUSTER_WORKER_ID:0}               # 仅 worker 策略使用，0~1023
+```
+
+要点：
+
+- **默认配置下行为与改造前完全一致**：`strategy=local` 时发号仍是「时间戳 36 进制 + 进程内自增」，SLA 防重仍是「同一张单只处置一次」，会话仍是进程内 Map，任务队列仍委托同一个线程池——**单机语义零变化**。
+- **未来实现用 `@Primary` 覆盖，不用 `@ConditionalOnMissingBean`**：`ClusterConfig` 里 4 个默认 `@Bean` 常驻，未来实现标注 `@Primary` 即可接管，不依赖 bean 注册顺序（只有 `TicketIdGenerator` 用 `@ConditionalOnProperty` 二选一）。
+- **诚实边界**：这里**没有引入真实 Redis / MQ**，四处默认实现都是进程内的；`WorkerTicketIdGenerator` **不是标准 64 位 Snowflake**——工单号是给人看的字符串，只需跨进程不重复，不需要时钟回拨那套复杂度。
+- **闸门不受影响**：受理闸门是 DB 条件更新（`TicketRepository.transitionStatusIf`），本身就天然多实例安全；本次改造动的是那些真正依赖进程内状态的角落。
+
+```bash
+# 发号策略切换（默认 local，不改代码只改参数）
+mvn spring-boot:run -Dspring-boot.run.profiles=offline \
+  -Dspring-boot.run.arguments="--server.port=39999 --dolphin.cluster.ticket-id.strategy=worker --dolphin.cluster.ticket-id.worker-id=1"
+
+# 等价的 env 写法（容器里推荐：实例号一般来自 K8s StatefulSet 序号，用 env 注入更自然）
+DOLPHIN_CLUSTER_TICKET_ID_STRATEGY=worker DOLPHIN_CLUSTER_WORKER_ID=1 mvn spring-boot:run -Dspring-boot.run.profiles=offline
+```
+
+实测（`--dolphin.cluster.ticket-id.strategy=worker --dolphin.cluster.ticket-id.worker-id=7`）连发两单：
+
+```text
+{"ticketId":"T2S2IVPLK-7-1", ...}   # 实例号位 = 7（base36「7」），进程内序列 1
+{"ticketId":"T2S2IVPN9-7-2", ...}   # 同实例序列自增 → 2
+```
+
+对照默认 `local` 策略（`demo/walkthrough.sh` 产出）为 `TMWX1LPWM1` 这类「无横杠」格式——两套实现格式不同、互不干扰。注意属性全名是 `dolphin.cluster.ticket-id.worker-id`，写成 `dolphin.cluster.worker-id` 会被 Spring Boot 当作**未知属性静默忽略**（实例号悄悄退回 0），这也是本轮验证时踩到过的坑。
+
+> 回归口径：默认配置下 `demo/walkthrough.sh` 七幕全通（`EXIT=0`，0 次等待超时），全量 `mvn test` **43 个测试类 261 用例全绿**（多实例改造新增 3 个测试类 12 个用例）。
+
 ## 全链路导览（P1 全链路可见化）
 
 任意一单都可用 `GET /api/tickets/{id}/timeline` 回放完整链路：节点轨迹、执行器基线/验证、审批决策、质检留痕统一按 `audit_log.id` 升序还原（`at` 仅展示——同毫秒事件会并列）。

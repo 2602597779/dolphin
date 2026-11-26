@@ -3,20 +3,18 @@ package com.dolphin.ticket.service;
 import com.alibaba.cloud.ai.graph.CompiledGraph;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
+import com.dolphin.cluster.TicketTaskQueue;
 import com.dolphin.ticket.infra.audit.AuditLogger;
 import com.dolphin.ticket.memory.TicketCheckpointStore;
 import com.dolphin.ticket.orchestration.TicketGraphCompiler;
 import com.dolphin.ticket.orchestration.state.TicketState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.Executor;
-import java.util.concurrent.RejectedExecutionException;
 
 /**
  * 工单图异步执行器(阶段 O8):受理即 202 后,图在独立线程池跑完并收尾。
@@ -37,7 +35,7 @@ import java.util.concurrent.RejectedExecutionException;
  * {@link QualityReviewService#reviewAsync}——先调度会有 REJECT 重开的 ESCALATED
  * 被收尾 CLOSED 覆盖的竞态。
  *
- * <p>失败补偿(超时/异常兜底):图异常、收尾落库异常或线程池拒绝时,补系统说明 + 转人工 +
+ * <p>失败补偿(超时/异常兜底):图异常、收尾落库异常或任务队列背压拒绝时,补系统说明 + 转人工 +
  * 审计留痕,工单绝不停留在 PROCESSING;卡死场景(进程崩溃等)由 SLA 响应计时器兜底
  * (PROCESSING 计入"未响应"口径,超时自动升级人工池)。
  *
@@ -60,7 +58,13 @@ public class TicketGraphRunner {
     private final TicketStatusService statusService;
     private final TicketEventPublisher eventPublisher;
     private final QualityReviewService qualityReviewService;
-    private final Executor executor;
+
+    /**
+     * 任务投递队列(P0 多实例就绪:从"直连进程内线程池"抽成接口)。
+     * 默认 {@link com.dolphin.cluster.LocalTicketTaskQueue}(包装 ticketGraphExecutor,语义不变);
+     * 未来换成任务表/真 MQ 实现时,本类无需改动——投递结果语义保持一致(接受/背压拒绝)。
+     */
+    private final TicketTaskQueue taskQueue;
 
     public TicketGraphRunner(TicketGraphCompiler compiler,
                              TicketCheckpointStore checkpointStore,
@@ -70,7 +74,7 @@ public class TicketGraphRunner {
                              TicketStatusService statusService,
                              TicketEventPublisher eventPublisher,
                              QualityReviewService qualityReviewService,
-                             @Qualifier("ticketGraphExecutor") Executor executor) {
+                             TicketTaskQueue taskQueue) {
         this.compiler = compiler;
         this.checkpointStore = checkpointStore;
         this.roundService = roundService;
@@ -79,7 +83,7 @@ public class TicketGraphRunner {
         this.statusService = statusService;
         this.eventPublisher = eventPublisher;
         this.qualityReviewService = qualityReviewService;
-        this.executor = executor;
+        this.taskQueue = taskQueue;
     }
 
     /** 提交轮次(首轮):受理后异步 invoke 图 */
@@ -114,18 +118,16 @@ public class TicketGraphRunner {
     }
 
     /**
-     * 投递轮次任务;线程池拒绝(仅进程关闭期可能)时就地补偿并返回 false,
+     * 投递轮次任务;队列背压拒绝(有界队列已满 / 执行器关闭)时就地补偿并返回 false,
      * 调用方以 503 应答(工单已转人工,不会停留在 PROCESSING)。
      */
     private boolean tryEnqueue(String ticketId, String failureAction, String poolReason, Runnable task) {
-        try {
-            executor.execute(task);
-            return true;
-        } catch (RejectedExecutionException e) {
-            log.error("[graph-runner] 任务投递被拒绝,就地补偿转人工 ticketId={}", ticketId, e);
-            compensate(ticketId, failureAction, poolReason, "线程池拒绝任务: " + e.getMessage());
+        if (!taskQueue.submit(task)) {
+            log.error("[graph-runner] 任务投递被拒绝,就地补偿转人工 ticketId={}", ticketId);
+            compensate(ticketId, failureAction, poolReason, "任务队列背压拒绝(队列已满或执行器已关闭)");
             return false;
         }
+        return true;
     }
 
     /** 提交/追问共用的 invoke 轮次 */

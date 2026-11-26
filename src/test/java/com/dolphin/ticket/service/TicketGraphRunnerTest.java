@@ -3,6 +3,7 @@ package com.dolphin.ticket.service;
 import com.alibaba.cloud.ai.graph.CompiledGraph;
 import com.alibaba.cloud.ai.graph.OverAllState;
 import com.alibaba.cloud.ai.graph.RunnableConfig;
+import com.dolphin.cluster.LocalTicketTaskQueue;
 import com.dolphin.ticket.infra.audit.AuditLogger;
 import com.dolphin.ticket.memory.TicketCheckpointStore;
 import com.dolphin.ticket.orchestration.TicketGraphCompiler;
@@ -34,7 +35,7 @@ import static org.mockito.Mockito.when;
  *   <li>转人工轮(终稿但无 FINAL_STATUS,节点已落 ESCALATED)→ 状态不覆盖、不质检;</li>
  *   <li>待审批 → 补 PENDING_APPROVAL,草稿入线程;</li>
  *   <li>图无结论(终稿与待审批动作皆空)→ 按失败补偿兜底,工单不留在 PROCESSING;</li>
- *   <li>线程池拒绝 → 就地补偿并返回 false(受理方应答 503)。</li>
+ *   <li>队列背压拒绝 → 就地补偿并返回 false(受理方应答 503)。</li>
  * </ol>
  */
 class TicketGraphRunnerTest {
@@ -52,7 +53,8 @@ class TicketGraphRunnerTest {
 
     private TicketGraphRunner runner(Executor executor) {
         return new TicketGraphRunner(compiler, checkpointStore, roundService, humanTicketPool,
-                auditLogger, statusService, eventPublisher, qualityReviewService, executor);
+                auditLogger, statusService, eventPublisher, qualityReviewService,
+                new LocalTicketTaskQueue(executor));
     }
 
     @Test
@@ -144,14 +146,15 @@ class TicketGraphRunnerTest {
 
     @Test
     void rejectedExecutionCompensatesAndReportsFailure() {
+        // 队列背压拒绝(有界队列满 / 执行器关闭)由 LocalTicketTaskQueue 翻译成 false
         assertThat(runner(task -> {
             throw new RejectedExecutionException("shutdown");
         }).enqueueApprovalResume(TICKET_ID, true)).isFalse();
 
         verify(roundService).completeRound(TICKET_ID, TicketService.STATUS_ESCALATED,
                 "系统繁忙,您的诉求已记录,将转人工跟进。");
-        verify(humanTicketPool).add(eq(TICKET_ID), eq("AI 审批续跑异常"), contains("线程池拒绝任务"));
-        verify(auditLogger).log(eq(TICKET_ID), eq("approve-failed"), contains("线程池拒绝任务"));
+        verify(humanTicketPool).add(eq(TICKET_ID), eq("AI 审批续跑异常"), contains("任务队列背压拒绝"));
+        verify(auditLogger).log(eq(TICKET_ID), eq("approve-failed"), contains("任务队列背压拒绝"));
         // 未跑图,不发布正常完成语义之外的状态翻转(completeRound 已落 ESCALATED)
         verify(eventPublisher).publishResult(eq(TICKET_ID), anyMap());
     }

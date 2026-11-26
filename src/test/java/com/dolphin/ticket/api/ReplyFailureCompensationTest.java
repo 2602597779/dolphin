@@ -1,5 +1,6 @@
 package com.dolphin.ticket.api;
 
+import com.dolphin.cluster.LocalTicketTaskQueue;
 import com.dolphin.ticket.auth.ApiKeyAuthFilter;
 import com.dolphin.ticket.infra.audit.AuditLogger;
 import com.dolphin.ticket.memory.TicketCheckpointStore;
@@ -65,7 +66,8 @@ class ReplyFailureCompensationTest {
                 new TicketStatusService(ticketService, conversationService, checkpointStore);
         TicketGraphRunner runner = new TicketGraphRunner(compiler, checkpointStore, roundService,
                 humanTicketPool, auditLogger, statusService, new TicketEventPublisher(),
-                mock(com.dolphin.ticket.service.QualityReviewService.class), executor);
+                mock(com.dolphin.ticket.service.QualityReviewService.class),
+                new LocalTicketTaskQueue(executor));
         return new TicketController(ticketService, approvalService, conversationService,
                 checkpointStore, roundService, auditLogger, runner, statusService,
                 new TicketEventPublisher(), new TicketAsyncProperties());
@@ -115,8 +117,9 @@ class ReplyFailureCompensationTest {
         // 线程池拒绝:受理失败应答 503,工单已就地补偿转人工(不停留在 PROCESSING)
         assertThat(response.getStatusCode().value()).isEqualTo(503);
         verify(ticketService).updateStatus(TICKET_ID, TicketService.STATUS_ESCALATED);
-        verify(humanTicketPool).add(eq(TICKET_ID), anyString(), contains("线程池拒绝任务"));
-        verify(auditLogger).log(eq(TICKET_ID), eq("reply-failed"), contains("线程池拒绝任务"));
+        // 队列拒绝的补偿文案是稳定串(拒绝细节只进日志,不进运营可见文案)
+        verify(humanTicketPool).add(eq(TICKET_ID), anyString(), contains("任务队列背压拒绝"));
+        verify(auditLogger).log(eq(TICKET_ID), eq("reply-failed"), contains("任务队列背压拒绝"));
     }
 
     private MockHttpServletRequest asCustomer() {

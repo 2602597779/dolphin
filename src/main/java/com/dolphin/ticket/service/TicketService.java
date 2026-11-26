@@ -1,5 +1,6 @@
 package com.dolphin.ticket.service;
 
+import com.dolphin.cluster.TicketIdGenerator;
 import com.dolphin.ticket.repo.TicketEntity;
 import com.dolphin.ticket.repo.TicketRepository;
 import org.springframework.data.domain.PageRequest;
@@ -10,7 +11,6 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 工单台账服务(P0 起持久化:H2 文件默认 / mysql profile 可切)。
@@ -49,12 +49,19 @@ public class TicketService {
 
     private final TicketRepository repository;
 
-    public TicketService(TicketRepository repository) {
-        this.repository = repository;
-    }
+    /**
+     * 发号器(P0 多实例就绪:从"内联序号"抽成接口)。
+     *
+     * <p>工单号生成不再是本类的私有状态:单实例默认 {@link com.dolphin.cluster.LocalTicketIdGenerator}
+     * (毫秒 base36 + 进程内序号,行为与改造前一致),多实例切
+     * {@link com.dolphin.cluster.WorkerTicketIdGenerator} 号段隔离——本类对此无感知。
+     */
+    private final TicketIdGenerator idGenerator;
 
-    /** 工单号自增序号:并发提交落在同一毫秒时由序号位区分,避免主键冲突 */
-    private final AtomicLong idSeq = new AtomicLong();
+    public TicketService(TicketRepository repository, TicketIdGenerator idGenerator) {
+        this.repository = repository;
+        this.idGenerator = idGenerator;
+    }
 
     /** 创建工单(内部渠道:告警自动开单等系统链路),返回生成的工单号 */
     public String create(String rawMessage) {
@@ -63,9 +70,7 @@ public class TicketService {
 
     /** 创建工单并绑定归属客户,返回生成的工单号 */
     public String create(String rawMessage, String customerId) {
-        // P0 并发修复:工单号 = 毫秒(base36) + 进程内序号(base36),并发提交同毫秒不再碰撞
-        String id = "T" + Long.toString(System.currentTimeMillis(), 36).toUpperCase()
-                + Long.toString(idSeq.incrementAndGet(), 36).toUpperCase();
+        String id = idGenerator.next();
         Instant now = Instant.now();
         repository.save(new TicketEntity(id, rawMessage, STATUS_NEW, customerId, now, now));
         return id;

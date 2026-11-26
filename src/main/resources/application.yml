@@ -124,6 +124,17 @@ dolphin:
     # 启动后首次巡检延迟(避开启动高峰)
     scan-initial-delay: ${DOLPHIN_SLA_SCAN_INITIAL_DELAY:30s}
 
+  # ---- 多实例就绪(发号器 / SLA 防重 / 会话 / 任务队列:接口留口,默认单机实现)----
+  # 诚实边界:四处只做「接口 + 默认实现 + 配置切换」,无 Redis/ZooKeeper/真实 MQ 客户端依赖;
+  # 单实例行为与抽取前逐字节一致(offline 演示与既有测试基线不受影响)。
+  # 换外部实现只需新增实现类并标 @Primary,调用方(构造注入接口)零改动。
+  cluster:
+    ticket-id:
+      # 工单号策略:local=单机(时间戳36进制+进程内自增) | worker=带节点号(多实例防同毫秒撞号)
+      strategy: ${DOLPHIN_CLUSTER_TICKET_ID_STRATEGY:local}
+      # worker 策略的节点编号(0~1023);多实例部署时每节点唯一,越界启动即报错
+      worker-id: ${DOLPHIN_CLUSTER_WORKER_ID:0}
+
   # ---- 云服务数据源(可插拔:模拟器 / HTTP 真实云)----------------------------
   # 骨架期全部为 mock 值:provider=sim 时根本不读 cloud.* ;provider=http 时
   # base-url 默认指向本应用自己的 /__mock 端点,无外网即可跑通全链路。

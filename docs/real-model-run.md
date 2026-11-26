@@ -17,7 +17,7 @@
 mvn spring-boot:run
 ```
 
-3. 跑 `demo/walkthrough.sh` 六幕同剧本（或按 README 剧本 1~6 逐条 curl），逐幕记录：
+3. 跑 `demo/walkthrough.sh` 七幕同剧本（`BASE_URL` 指向本机端口、`API_KEY` 用客户 Key；或按 README 剧本 1~7 逐条 curl），逐幕记录：
 
 | 记录项 | 说明 |
 |---|---|
@@ -41,7 +41,7 @@ mvn spring-boot:run
 
 ## 四、T9.4 兜底口径（无 Key 期间的面试表述）
 
-> "项目当前完成的是**离线桩全链路验证**：路由、图编排、审批中断/resume、幂等、基线验证、质检、人工池全部跑通（225 用例 + 六幕剧本可复核）。
+> "项目当前完成的是**离线桩全链路验证**：路由、图编排、审批中断/resume、幂等、基线验证、质检、人工池全部跑通（**43 个测试类 261 用例** + 七幕剧本可复核）。
 > 架构上做了**零代码切换**设计：注入 `DOLPHIN_API_KEY` 即切真实模型（`OfflineModelConfig` 的桩 Bean 带 `@Profile("offline") + @Primary`，不激活 profile 即失效）。
 > 真实模型下的意图识别准确率与 token 成本我还没完成专项验证——这是我当前排期的第一件事。"
 

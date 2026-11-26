@@ -1,5 +1,8 @@
 package com.dolphin.sla;
 
+import com.dolphin.cluster.DbSlaBreachGuard;
+import com.dolphin.cluster.LocalTicketIdGenerator;
+import com.dolphin.cluster.SlaBreachGuard;
 import com.dolphin.notify.NotifySender;
 import com.dolphin.cloud.CloudApiProperties;
 import com.dolphin.ticket.infra.audit.AuditLogEntity;
@@ -54,22 +57,28 @@ class SlaMonitorTest {
     private NotifySender notifier;
     private SlaMonitor monitor;
     private HumanTicketPool pool;
+    private AuditLogger auditLogger;
+    private SlaProperties properties;
+    private SlaBreachGuard breachGuard;
 
     @BeforeEach
     void setUp() {
         notifier = mock(NotifySender.class);
         when(notifier.send(startsWith("[SLA加急]"), contains("P1"))).thenReturn(true);
-        AuditLogger auditLogger = new AuditLogger(new CloudApiProperties(), auditLogRepository);
-        pool = new HumanTicketPool(humanTaskRepository, auditLogger, new TicketService(ticketRepository),
+        auditLogger = new AuditLogger(new CloudApiProperties(), auditLogRepository);
+        pool = new HumanTicketPool(humanTaskRepository, auditLogger,
+                new TicketService(ticketRepository, new LocalTicketIdGenerator()),
                 mock(ConversationService.class));
         // 秒级时限,固定时钟推进判定,无需真实等待
-        SlaProperties properties = new SlaProperties();
+        properties = new SlaProperties();
         properties.setResponse(Map.of("P1", Duration.ofSeconds(30), "P2", Duration.ofMinutes(30),
                 "P4", Duration.ofSeconds(30)));
         properties.setResolve(Map.of("P1", Duration.ofSeconds(60), "P2", Duration.ofMinutes(30),
                 "P3", Duration.ofMinutes(5)));
+        // 防重守卫默认走 DB 条件更新(与多实例部署同一实现)
+        breachGuard = new DbSlaBreachGuard(ticketRepository);
         monitor = new SlaMonitor(ticketRepository, pool, auditLogger, notifier, properties,
-                Clock.fixed(NOW, ZoneOffset.UTC));
+                breachGuard, Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     @Test
@@ -174,6 +183,21 @@ class SlaMonitorTest {
         monitor.scan();
 
         assertThat(ticketRepository.findById("t7").orElseThrow().getSlaBreachAt()).isEqualTo(NOW);
+    }
+
+    @Test
+    void breachGuardRejectionSkipsAllSideEffects() {
+        // 多实例语义:另一个节点已抢占这张超时单的处置权 → 本节点即使扫描到也必须
+        // 跳过全部副作用(不入池、不审计、不加急),否则同一超时单会被重复升级刷屏
+        ticket("t8", TicketService.STATUS_PENDING_APPROVAL, "P1", NOW.minus(Duration.ofMinutes(5)));
+        SlaMonitor otherNode = new SlaMonitor(ticketRepository, pool, auditLogger, notifier, properties,
+                (id, at) -> false, Clock.fixed(NOW, ZoneOffset.UTC));
+
+        otherNode.scan();
+
+        assertThat(pool.get("t8")).isEmpty();
+        assertThat(auditRows("sla-breach")).isEmpty();
+        verifyNoInteractions(notifier);
     }
 
     // ---- 造数辅助 ----

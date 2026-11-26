@@ -39,7 +39,7 @@
 
 ### 收尾（20 秒）
 
-> "项目目前 40 个测试类 249 用例全绿，有 GitHub Actions CI 和 Flyway 版本化迁移；并发链路完成专项改造（受理 34ms、审批 49ms、7 项业务指标可观测）；通知链路还做了进程内 MQ 语义实现（缓冲+限速+重试，对齐钉钉 20 条/分硬限流）。定位是**离线全链路验证 + 真实模型小规模验证**，不是生产系统——但每个工程决策我都有代码和测试可以展开讲。"
+> "项目目前 43 个测试类 261 用例全绿，有 GitHub Actions CI 和 Flyway 版本化迁移；并发链路完成专项改造（受理 34ms、审批 49ms、7 项业务指标可观测）；通知链路还做了进程内 MQ 语义实现（缓冲+限速+重试，对齐钉钉 20 条/分硬限流）。定位是**离线全链路验证 + 真实模型小规模验证**，不是生产系统——但每个工程决策我都有代码和测试可以展开讲。"
 
 ---
 
@@ -143,7 +143,7 @@
 
 ### Q9：这个项目最大的不足？（低频，送分题也是陷阱）
 
-**答**："三个：① 真实模型的效果数据还没测（离线桩验证的是链路不是模型智力）；② IM 审批闭环没做（设计好了平台无关回调协议，缺真机验证）；③ 并发改造是单机方案（进程内线程池+信号量），多实例部署需要外置三件套——发号器接口化（当前 AtomicLong）、SlaMonitor 防重与会话外置、任务队列外置（MQ 或 DB 轮询），已明确标注为多实例前置项，闸门本身不受影响（DB 条件更新天然多实例安全）。"
+**答**："三个：① 真实模型的效果数据还没测（离线桩验证的是链路不是模型智力）；② IM 审批闭环没做（设计好了平台无关回调协议，缺真机验证）；③ 并发改造是单机方案（进程内线程池+信号量），多实例部署原本缺三件套——这个问题我已经**按接口留口的方式提前拆解了**：发号器（`TicketIdGenerator`，当前 `local`，另有去中心化的 `worker` 策略）、SLA 防重（`SlaBreachGuard`，条件更新抢处置权）、会话（`SessionStore`，读写分离契约）、任务队列（`TicketTaskQueue`，拒绝即补偿转人工）四处都抽成了「接口 + 进程内默认实现 + 配置切换」，将来接 Redis / MQ 只换实现类，调用方不动。边界我也说清楚：**没有引入真实 Redis/MQ**，现在的默认实现仍是进程内的，缺的是分布式存储与跨进程分发；闸门本身不受影响（DB 条件更新天然多实例安全）。"
 
 **禁区**：不说"生产运行中"、不说"服务 X 万用户"。定位话术："个人完整实现的企业级架构实践"。
 
@@ -205,7 +205,7 @@
 | 聊天建单受理 | 2-3s（同步跑图） | **34ms** | offline 实测 curl 计时 |
 | 粘性审批 | ~5.3s（同步 resume） | **49ms** | 同上 |
 | 并发双发「同意」 | — | 1 赢家 1 输家（输家按实际状态告知） | walkthrough 7.3 并发实测 |
-| 测试 | 225 用例 | **249 用例全绿**（40 类） | `mvn test` 两轮 |
+| 测试 | 225 用例 | **261 用例全绿**（43 类） | `mvn test` 两轮 |
 | 指标端点 | 无 | **7 项业务指标**（LLM 2 / 图 2 / 通知 3）+ actuator 基础指标 | curl /actuator/prometheus |
 
 > 口径提醒：以上均为 **offline 桩模型**下的链路验证数据（证明架构与正确性，不证明模型智力）；真实模型数据待 `DOLPHIN_API_KEY`。
@@ -236,13 +236,54 @@
 - 实测（offline，`--dolphin.notify.channel=mq`，2026-11-25）：告警 webhook → 异步诊断 → `[notify-consumer]` 线程投递降级日志；同一次运行里 SLA 加急通知同样由 `notify-consumer` 投递（两个生产者都被队列接管）；`dolphin_notify_queue_depth` / `_queue_dropped_total` / `_dead_letter_total` 在 `/actuator/prometheus` 可见
 - 测试：`notify/MqNotifySenderTest.java` 9 用例（顺序投递/限速间隔/重试后成功/重试耗尽进死信/未配置不重试/队列满拒绝/shutdown 停线程/channel 选 bean）
 
+### 3.6 多实例就绪专题：四处接口留口（2026-11 完成，Q9 ③ 的展开版）
+
+**一句话总纲**："单机并发改造之后，真正卡多实例的是**进程内状态**。我没引入 Redis/MQ，而是把四处进程内状态**抽成接口 + 默认实现 + 配置切换**，沿用通知链路 `NotifySender` 的同一套范式——**先留口，后换实现**。"
+
+| 位置 | 接口 | 当前默认实现 | 进程内状态是什么 | 多实例时要换什么 |
+|---|---|---|---|---|
+| 发号器 | `cluster/TicketIdGenerator.next()` | `LocalTicketIdGenerator`（毫秒+进程内序号） | 进程内 `AtomicLong` 序列 | `WorkerTicketIdGenerator`（已实现，`strategy=worker` 一行切换）或 Snowflake |
+| SLA 防重 | `cluster/SlaBreachGuard.claim(id, ts)` | `DbSlaBreachGuard`（条件 UPDATE 抢处置权） | **不在进程内**，已靠 DB 条件更新 | 无需更换（天然多实例安全，留口只为可替换/可测） |
+| 会话 | `router/SessionStore` | `LocalSessionStore`（进程内 Map） | 会话上下文 | Redis 等外部 KV（契约：`getOrCreate` 取对象 → 就地改 → `save(ctx)` 写回；进程内 `save` 是 touch-only 空操作） |
+| 任务队列 | `cluster/TicketTaskQueue.submit(task)` | `LocalTicketTaskQueue`（委托既有 `ticketGraphExecutor`） | 进程内线程池 | 真实 MQ（跨进程分发）；拒绝即补偿转人工的语义不变 |
+
+**"为什么不做成 `@ConditionalOnMissingBean`？"（考点）**：
+> "**bean 注册顺序不可靠**——同一个 `@ConditionalOnMissingBean` 判定通过与否取决于扫描顺序，多模块下很难保证'默认实现一定先注册'。所以统一成'**默认 `@Bean` 常驻 + 未来实现标 `@Primary` 覆盖**'，只有发号器这种'两套实现都真实存在'的才用 `@ConditionalOnProperty` 做二选一。"
+
+**"为什么三处只有发号器做了开关？"**：
+> "因为**只有发号器真有两套可用实现**（local / worker），做成开关才叫'切换'。另外三处现在只有一个实现，硬造个 `redis` 配置项就是**装饰性配置**——写了 redis 却没实现，面试官一追问就崩。那三处只留接口，将来带实现过来时 `@Primary` 顶掉。"
+
+**"SLA 防重为什么说天然安全？"**：
+> "它压根不依赖进程内状态：`claim()` 是一条带条件的 `UPDATE ... WHERE sla_breach_at IS NULL`，谁先抢到谁赢，DB 行锁保证原子性。多实例同时巡检同一张超时单，只会有一个更新到行。所以它是'接口留口'，不是'多实例缺口'。"
+
+**实测（offline，`strategy=worker` + `worker-id=7`）**：
+```text
+POST /api/tickets/submit  →  {"ticketId":"T2S2IVPLK-7-1", ...}   # 实例号位=7，序列 1
+POST /api/tickets/submit  →  {"ticketId":"T2S2IVPN9-7-2", ...}   # 同实例序列自增 → 2
+```
+默认 `strategy=local` 下（`demo/walkthrough.sh` 产出）为 `TMWX1LPWM1` 这类**无横杠**格式——两套实现格式不同、默认路径行为与改造前完全一致。
+
+**诚实边界（必说）**：
+> "这四处**都不是真实分布式实现**：会话还是进程内 Map，任务队列还是进程内线程池，发号器只是个去中心化的号段隔离方案（`T{相对毫秒 base36}-{实例号 base36}-{序列 base36}`，**不是标准 64 位 Snowflake**——工单号是给人看的字符串，只需要'跨进程不重复'这一个性质）。缺的是**分布式存储（会话持久化）与跨进程分发（队列）**，换实现时调用方一行不动，这才是这次改造的全部价值。"
+
+**踩坑留痕（真事故，可当'你踩过什么坑'答）**：
+> "验证 worker 策略时我把属性写成了 `--dolphin.cluster.worker-id=7`，漏了中间的 `ticket-id`，结果 Spring Boot 把它当**未知属性静默忽略**，实例号悄悄退回 0、号还是照发——**没有任何报错**。这说明'配置切换'光跑通不算验证，必须**断言产出物格式**（我核对了工单号里的实例号位）才算。全名是 `dolphin.cluster.ticket-id.worker-id`。"
+
+**证据**：
+- 接口与实现：`cluster/TicketIdGenerator.java`、`LocalTicketIdGenerator.java`、`WorkerTicketIdGenerator.java`、`SlaBreachGuard.java`、`DbSlaBreachGuard.java`、`TicketTaskQueue.java`、`LocalTicketTaskQueue.java`、`router/SessionStore.java` + `LocalSessionStore.java`
+- 装配与配置：`cluster/ClusterConfig.java`、`cluster/TicketIdProperties.java`、`application.yml` 的 `dolphin.cluster` 块
+- 条件更新落地：`ticket/repo/TicketRepository.java`（`claimSlaBreach`）
+- 测试：`cluster/TicketIdGeneratorTest`（4）、`cluster/DbSlaBreachGuardTest`（3，含并发抢占只有一个赢家）、`cluster/LocalTicketTaskQueueTest`（3）
+- 回归：默认配置下 `demo/walkthrough.sh` 七幕全通（`EXIT=0`，0 次等待超时）；全量 `mvn test` **43 类 261 用例全绿**
+
 ---
 
 ## 四、效果数据口径表（T9.2）
 
 | 指标 | 数值 | 来源与口径 | 可信度标注 |
 |---|---|---|---|
-| 测试用例 | 40 类 249 用例全绿 | `mvn test` 实测（2026-11-25） | ✅ 已验证 |
+| 测试用例 | 43 类 261 用例全绿 | `mvn test` 实测（2026-11-26，多实例改造新增 3 类 12 用例） | ✅ 已验证 |
+| 发号策略切换 | `strategy=worker` + `worker-id=7` → `T2S2IVPLK-7-1` / `T2S2IVPN9-7-2` | `POST /api/tickets/submit` @39999 offline 实测（2026-11-26） | ✅ 已验证 |
 | CI | 历史全绿（run 42183646528）；2026-11-23 后多笔推送（c83ae2a/8c9979b/0150598/90b7740/b45ca67）CI 状态未回读 | GitHub Actions（api.github.com 网络受限，需外部环境确认） | ⚠️ 部分未验证 |
 | 迁移路径 | 空库/存量库/幂等 三路径通过 | PLAN.md 阶段 8 记录 | ✅ 已验证 |
 | 聊天受理延迟 | 34ms（原同步 2-3s） | offline 实测 curl 计时（2026-11-24） | ✅ 已验证（offline 口径） |
@@ -267,7 +308,7 @@
 3. ❌ 不贬低其他框架（"LangChain 太黑盒"这类话不说，说"选型权衡"）
 4. ❌ 不主动提 LeetcodeTest.java（那是刷题，与项目无关，被问就承认）
 5. ✅ 所有结论必须能落到 `file:line` 或 README 剧本
-6. ✅ 并发数据只说 offline 口径实测值（34ms/49ms/249 用例），不外推生产压测数字
+6. ✅ 并发数据只说 offline 口径实测值（34ms/49ms/43 类 261 用例），不外推生产压测数字
 7. ✅ MQ 只说"进程内 MQ 语义实现"，不说"用了 RocketMQ/真消息队列"；被问持久化/多实例分发就承认短板，并说明生产替换为 RocketMQ 属实现替换
 
 ## 六、待办（面试前完成）
