@@ -39,7 +39,7 @@
 
 ### 收尾（20 秒）
 
-> "项目目前 43 个测试类 261 用例全绿，有 GitHub Actions CI 和 Flyway 版本化迁移；并发链路完成专项改造（受理 34ms、审批 49ms、7 项业务指标可观测）；通知链路还做了进程内 MQ 语义实现（缓冲+限速+重试，对齐钉钉 20 条/分硬限流）。定位是**离线全链路验证 + 真实模型小规模验证**，不是生产系统——但每个工程决策我都有代码和测试可以展开讲。"
+> "项目目前 49 个测试类 310 用例全绿，有 GitHub Actions CI 和 Flyway 版本化迁移；并发链路完成专项改造（受理 34ms、审批 49ms、7 项业务指标可观测）；通知链路还做了进程内 MQ 语义实现（缓冲+限速+重试，对齐钉钉 20 条/分硬限流）。定位是**离线全链路验证 + 真实模型小规模验证**，不是生产系统——但每个工程决策我都有代码和测试可以展开讲。"
 
 ---
 
@@ -205,7 +205,7 @@
 | 聊天建单受理 | 2-3s（同步跑图） | **34ms** | offline 实测 curl 计时 |
 | 粘性审批 | ~5.3s（同步 resume） | **49ms** | 同上 |
 | 并发双发「同意」 | — | 1 赢家 1 输家（输家按实际状态告知） | walkthrough 7.3 并发实测 |
-| 测试 | 225 用例 | **261 用例全绿**（43 类） | `mvn test` 两轮 |
+| 测试 | 225 用例 | **310 用例全绿**（49 类） | `mvn test` 两轮 |
 | 指标端点 | 无 | **7 项业务指标**（LLM 2 / 图 2 / 通知 3）+ actuator 基础指标 | curl /actuator/prometheus |
 
 > 口径提醒：以上均为 **offline 桩模型**下的链路验证数据（证明架构与正确性，不证明模型智力）；真实模型数据待 `DOLPHIN_API_KEY`。
@@ -250,8 +250,8 @@
 **"为什么不做成 `@ConditionalOnMissingBean`？"（考点）**：
 > "**bean 注册顺序不可靠**——同一个 `@ConditionalOnMissingBean` 判定通过与否取决于扫描顺序，多模块下很难保证'默认实现一定先注册'。所以统一成'**默认 `@Bean` 常驻 + 未来实现标 `@Primary` 覆盖**'，只有发号器这种'两套实现都真实存在'的才用 `@ConditionalOnProperty` 做二选一。"
 
-**"为什么三处只有发号器做了开关？"**：
-> "因为**只有发号器真有两套可用实现**（local / worker），做成开关才叫'切换'。另外三处现在只有一个实现，硬造个 `redis` 配置项就是**装饰性配置**——写了 redis 却没实现，面试官一追问就崩。那三处只留接口，将来带实现过来时 `@Primary` 顶掉。"
+**"为什么最早只有发号器做了开关？"**：
+> "因为一开始**只有发号器真有两套可用实现**（local / worker），做成开关才叫'切换'，另外三处只有一个实现，硬造个 `redis` 配置项就是**装饰性配置**——写了 redis 却没实现，面试官一追问就崩。**D5 之后判断标准没变，只是条件变了**：会话存储和任务队列也各自补上了第二套真实实现（落在项目自带的关系库上，零新增依赖、零中间件），于是它们同样升格为 `@ConditionalOnProperty` 开关（默认分支都带 `matchIfMissing = true`，不配参数时行为与改造前逐字节一致）；SLA 防重守卫仍是单实现，继续保持 `@Primary` 留口。"
 
 **"SLA 防重为什么说天然安全？"**：
 > "它压根不依赖进程内状态：`claim()` 是一条带条件的 `UPDATE ... WHERE sla_breach_at IS NULL`，谁先抢到谁赢，DB 行锁保证原子性。多实例同时巡检同一张超时单，只会有一个更新到行。所以它是'接口留口'，不是'多实例缺口'。"
@@ -264,7 +264,7 @@ POST /api/tickets/submit  →  {"ticketId":"T2S2IVPN9-7-2", ...}   # 同实例�
 默认 `strategy=local` 下（`demo/walkthrough.sh` 产出）为 `TMWX1LPWM1` 这类**无横杠**格式——两套实现格式不同、默认路径行为与改造前完全一致。
 
 **诚实边界（必说）**：
-> "这四处**都不是真实分布式实现**：会话还是进程内 Map，任务队列还是进程内线程池，发号器只是个去中心化的号段隔离方案（`T{相对毫秒 base36}-{实例号 base36}-{序列 base36}`，**不是标准 64 位 Snowflake**——工单号是给人看的字符串，只需要'跨进程不重复'这一个性质）。缺的是**分布式存储（会话持久化）与跨进程分发（队列）**，换实现时调用方一行不动，这才是这次改造的全部价值。"
+> "这四处**都不是真实分布式实现**：会话还是进程内 Map，任务队列还是进程内线程池，发号器只是个去中心化的号段隔离方案（`T{相对毫秒 base36}-{实例号 base36}-{序列 base36}`，**不是标准 64 位 Snowflake**——工单号是给人看的字符串，只需要'跨进程不重复'这一个性质）。缺的是**分布式存储（会话持久化）与跨进程分发（队列）**，换实现时调用方一行不动，这才是这次改造的全部价值。这两块 D5 已经用项目自带的关系库补上了第二套实现（共享表 + 配置切换，默认仍是进程内），但共享表**不等于 MQ**：任务表只做投递留痕、条件更新抢占、终态收口和超时巡检，**不提供跨进程重建执行**。"
 
 **踩坑留痕（真事故，可当'你踩过什么坑'答）**：
 > "验证 worker 策略时我把属性写成了 `--dolphin.cluster.worker-id=7`，漏了中间的 `ticket-id`，结果 Spring Boot 把它当**未知属性静默忽略**，实例号悄悄退回 0、号还是照发——**没有任何报错**。这说明'配置切换'光跑通不算验证，必须**断言产出物格式**（我核对了工单号里的实例号位）才算。全名是 `dolphin.cluster.ticket-id.worker-id`。"
@@ -274,7 +274,32 @@ POST /api/tickets/submit  →  {"ticketId":"T2S2IVPN9-7-2", ...}   # 同实例�
 - 装配与配置：`cluster/ClusterConfig.java`、`cluster/TicketIdProperties.java`、`application.yml` 的 `dolphin.cluster` 块
 - 条件更新落地：`ticket/repo/TicketRepository.java`（`claimSlaBreach`）
 - 测试：`cluster/TicketIdGeneratorTest`（4）、`cluster/DbSlaBreachGuardTest`（3，含并发抢占只有一个赢家）、`cluster/LocalTicketTaskQueueTest`（3）
-- 回归：默认配置下 `demo/walkthrough.sh` 七幕全通（`EXIT=0`，0 次等待超时）；全量 `mvn test` **43 类 261 用例全绿**
+- 回归：默认配置下 `demo/walkthrough.sh` 八幕全通（`EXIT=0`，0 次等待超时）；全量 `mvn test` **49 类 310 用例全绿**
+
+### 3.7 D5 持久化专题：会话与任务队列的第二套实现（2026-11-27 完成）
+
+**"你的会话粘性和任务队列，多实例下会怎样？"（考点）**：
+> "默认单机语义下没区别。真起两个实例时，`DOLPHIN_CLUSTER_SESSION_STORE=jdbc` + `DOLPHIN_CLUSTER_TASK_QUEUE=jdbc` 就把这两处换到**同一张共享表**上：会话老状态、审批挂起上下文写在 `session_context`，谁实例都读得到（`getOrCreate` 回读实体再回填 capability / pendingTicketId）；任务投递写在 `ticket_task`，`submit` 先落一行 PENDING 再去跑，谁抢到谁把状态条件更新成 RUNNING，收口写 DONE/FAILED/REJECTED。调用方一行没动，换的只是实现类。"
+
+**"这算引入 MQ 了吗？"**：
+> "**不算，也没打算算**。`submit` 的签名是 `Runnable`，里面没有工单号也没有可恢复意图——图执行随进程生灭，进程没了那一轮就真没了。所以 `ticket_task` 我只承诺四件事：投递留痕、条件更新抢占（`UPDATE ... WHERE status = 'PENDING'` 抢到才跑）、终态收口、以及**定时巡检把超时未收口的行改判 `STUCK` 留痕**。跨进程重建执行需要真消息契约（工单号 + 可恢复状态 + 幂等消费），那是另一个量级的改造，我明确不做、也不假装做了。"
+
+**实测（offline，双开关起服 + 八幕 walkthrough）**：
+```text
+[dolphin] [main] c.d.cluster.JdbcTicketTaskQueue : [task-queue] 使用共享任务表实现(表 ticket_task):投递留痕+抢占标记+孤儿巡检,workerId=31800@DESKTOP-…
+[dolphin] [main] c.d.router.JdbcSessionStore      : [session-store] 使用共享表实现(表 session_context):多实例共享会话粘性,空闲 TTL=PT30M
+[dolphin] [scheduling-1] c.d.cluster.JdbcTicketTaskQueue : [task-queue] 巡检发现 1 个滞留任务,已标记 STUCK 留痕(不重建执行)   # 以 stale-after=1s 重启后复现
+```
+`demo/walkthrough.sh` 在 jdbc 模式下同样八幕全通（`EXIT=0`、0 次等待超时），第七幕粘性审批命中用的是**从共享表回读**的状态（`StickySessionMatcher 命中 … by STICKY`，此时进程内已无 `LocalSessionStore` Bean）。
+
+**诚实边界（必说）**：
+> "两个限制讲清楚：一是共享表实现**不重建执行**，只把'谁在跑、跑没跑完、谁死了'留痕，供人工核对；二是本地 H2 文件库在**硬杀进程**下不保证保留最近几条提交（`Stop-Process -Force` 前后实测行数会不一致，属于 H2 MVStore 的检查点语义，代码里对 `ticket_task` 没有任何 DELETE 语句），生产换 MySQL 不带这个限制。"
+
+**证据**：
+- 迁移与实体：`db/migration/V3__session_context.sql`、`V4__ticket_task.sql`、`router/repo/SessionContextEntity.java` + `SessionContextRepository.java`、`cluster/repo/TicketTaskEntity.java` + `TicketTaskRepository.java`
+- 两套实现：`router/JdbcSessionStore.java`（对齐进程内版 `LocalSessionStore.java`）、`cluster/JdbcTicketTaskQueue.java`（对齐进程内版 `LocalTicketTaskQueue.java`）
+- 装配与配置：`cluster/ClusterConfig.java`、`cluster/SessionStoreProperties.java`、`cluster/TaskQueueProperties.java`、`application.yml` 的 `dolphin.cluster.session-store` / `task-queue` 块
+- 测试：`router/JdbcSessionStoreTest`（5：跨实例回读粘性 / 每读一次返回新快照 / 空闲超阈值被巡检清掉 / size 走共享表 / 并发首建回读既有行）、`cluster/JdbcTicketTaskQueueTest`（5：投递→DONE / 执行器拒绝→REJECTED 且 `submit` 返回 false / 执行体抛异常→FAILED 且不外抛 / 巡检把滞留行标 STUCK / 抢占是条件更新只赢一次）
 
 ---
 
@@ -282,7 +307,7 @@ POST /api/tickets/submit  →  {"ticketId":"T2S2IVPN9-7-2", ...}   # 同实例�
 
 | 指标 | 数值 | 来源与口径 | 可信度标注 |
 |---|---|---|---|
-| 测试用例 | 43 类 261 用例全绿 | `mvn test` 实测（2026-11-26，多实例改造新增 3 类 12 用例） | ✅ 已验证 |
+| 测试用例 | 49 类 310 用例全绿 | `mvn test` 实测（2026-11-27；多实例改造 +3 类 12 用例、D1 IM 审批 +4 类 39 用例、D5 持久化 +2 类 10 用例） | ✅ 已验证 |
 | 发号策略切换 | `strategy=worker` + `worker-id=7` → `T2S2IVPLK-7-1` / `T2S2IVPN9-7-2` | `POST /api/tickets/submit` @39999 offline 实测（2026-11-26） | ✅ 已验证 |
 | CI | 历史全绿（run 42183646528）；2026-11-23 后多笔推送（c83ae2a/8c9979b/0150598/90b7740/b45ca67）CI 状态未回读 | GitHub Actions（api.github.com 网络受限，需外部环境确认） | ⚠️ 部分未验证 |
 | 迁移路径 | 空库/存量库/幂等 三路径通过 | PLAN.md 阶段 8 记录 | ✅ 已验证 |
@@ -291,6 +316,8 @@ POST /api/tickets/submit  →  {"ticketId":"T2S2IVPN9-7-2", ...}   # 同实例�
 | 并发闸门 | 双发「同意」1 赢家 1 输家 | walkthrough 7.3 并发实测 | ✅ 已验证（offline 口径） |
 | 业务指标 | 7 项经 /actuator/prometheus 暴露（LLM 2 / 图 2 / 通知 3） | curl 实测（2026-11-25） | ✅ 已验证 |
 | 通知链路 MQ（offline） | 告警诊断 + SLA 加急两条通知均由 `notify-consumer` 单线程投递；3 个 notify 指标可见 | offline `--dolphin.notify.channel=mq` 实测（2026-11-25） | ✅ 已验证（offline 口径） |
+| 持久化切换（D5） | `session-store.kind=jdbc` + `task-queue.kind=jdbc` → 会话粘性自 `session_context` 回读、任务落 `ticket_task`（DONE 10 / RUNNING 1） | offline 双开关起服 + 八幕 walkthrough + H2 Shell 直连查询（2026-11-27） | ✅ 已验证（offline 口径） |
+| 孤儿任务巡检（D5） | `stale-after=1s` 重启 → WARN「巡检发现 1 个滞留任务,已标记 STUCK 留痕(不重建执行)」，行状态 RUNNING→STUCK | offline 实测 + H2 断言（2026-11-27） | ✅ 已验证（offline 口径） |
 | 自动化结单率 | 80%（4/5） | 离线桩模型 + 5 单剧本 | ⚠️ 标注 offline |
 | 审批触发率 | 20%（1/5） | 同上 | ⚠️ 标注 offline |
 | 质检通过率 | 5/5 PASS | 同上 | ⚠️ 标注 offline |
@@ -308,8 +335,8 @@ POST /api/tickets/submit  →  {"ticketId":"T2S2IVPN9-7-2", ...}   # 同实例�
 3. ❌ 不贬低其他框架（"LangChain 太黑盒"这类话不说，说"选型权衡"）
 4. ❌ 不主动提 LeetcodeTest.java（那是刷题，与项目无关，被问就承认）
 5. ✅ 所有结论必须能落到 `file:line` 或 README 剧本
-6. ✅ 并发数据只说 offline 口径实测值（34ms/49ms/43 类 261 用例），不外推生产压测数字
-7. ✅ MQ 只说"进程内 MQ 语义实现"，不说"用了 RocketMQ/真消息队列"；被问持久化/多实例分发就承认短板，并说明生产替换为 RocketMQ 属实现替换
+6. ✅ 并发数据只说 offline 口径实测值（34ms/49ms/49 类 310 用例），不外推生产压测数字
+7. ✅ MQ 只说"进程内 MQ 语义实现"，不说"用了 RocketMQ/真消息队列"；被问持久化/多实例分发时讲清现状：会话粘性与任务留痕已有共享表实现（`session-store.kind=jdbc` / `task-queue.kind=jdbc` 可切换，默认仍是进程内），但任务表**只做投递留痕与孤儿检测、不提供跨进程重建执行、它不是 MQ**；生产替换为 RocketMQ 属实现替换
 
 ## 六、待办（面试前完成）
 
