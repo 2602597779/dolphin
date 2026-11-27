@@ -1,4 +1,4 @@
-﻿# Dolphin 企业化改造计划（断点续传文档）
+# Dolphin 企业化改造计划（断点续传文档）
 
 > **用途**：多会话协作的进度凭证。每次会话开始时，先读本文件 + `git log --oneline` 确定断点，再继续执行。
 > **规则**：
@@ -12,7 +12,7 @@
 ## 项目背景（新会话速读）
 
 Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + Spring AI Alibaba Graph + JPA/H2）。
-现状：多 Agent 图编排闭环、审批中断/resume、幂等/防重放/审计、状态全落库、告警诊断、RAG、质检、人工池均已实现，37 个测试类 225 用例全绿（改造前基线 153 用例；该数字随阶段推进递增，以最新 `mvn test` 输出为准）。
+现状：多 Agent 图编排闭环、审批中断/resume、幂等/防重放/审计、状态全落库、告警诊断、RAG、质检、人工池均已实现，47 个测试类 300 用例全绿（改造前基线 153 用例；该数字随阶段推进递增，以最新 `mvn test` 输出为准）。
 目标：从"技术真实的工具"升级为"业务真实的产品"，达到面试可讲、经得起追问的企业级形态。
 技术深度线（代码质量）**已够用，不再投入**；剩余工作全部是业务真实感补全。
 
@@ -92,7 +92,7 @@ Dolphin = 云服务工单多智能体系统（Spring Boot 3.5 + Spring AI 1.0 + 
 ## 第二梯队（有余力再做，不影响主线）
 
 - [x] 阶段 4：工单多轮对话 `POST /api/tickets/{id}/reply`（对话历史进图状态，PENDING 单基于上下文续跑）——业务真实感最大单点
-- [ ] 阶段 5：IM 卡片审批（平台无关回调协议 + 钉钉参考实现）——方案 2026-11-09 定稿，任务拆解与面试话术见下方「2026-11-09 定稿」专节——**2026-11-10 降级：让位于阶段 9 面试冲刺，余力再做**
+- [x] 阶段 5：IM 卡片审批（平台无关回调协议 + 钉钉参考实现）——方案 2026-11-09 定稿，任务拆解与面试话术见下方「2026-11-09 定稿」专节——**2026-11-27 完成**（commit `a56d92a`：回调入口 + 钉钉参考实现 + 回调幂等 + README 剧本 7 + 演示第八幕；全量 300 用例/47 类 0 失败，已推 origin/master 与 origin/master:main）
 - [ ] 阶段 6：运营指标接入可观测体系（2026-11-06 决策改版：放弃"静态 HTML 简单页"方案，改为 Micrometer 业务指标暴露 + Prometheus 抓取 + Grafana dashboard JSON 入库的企业标准路线；代码侧约 1 天：actuator+micrometer-registry-prometheus 依赖、BusinessMetricsBinder 把 summary() 七指标注册 Gauge、TicketService 事件 Counter 埋点、prometheus.yml 与 dashboard JSON 入 ops/；**当前暂缓**，面试定位=效果验证章节的收尾，非核心考点；钉钉同理华为内部无钉钉，叙事用"WeLink 架构同构、钉钉沙箱真机验证"双层话术）
 - [x] 阶段 7：GitHub Actions CI（mvn test）——`.github/workflows/ci.yml`（push/PR 到 main，temurin 21 + Maven 缓存，测试离线自洽零密钥）。2026-11-06 真实验证：push `885279c` → Actions run 42183646528 全绿（https://github.com/2602597779/dolphin/actions/runs/42183646528）
 - [x] 阶段 8：Flyway 管 schema（替换 ddl-auto: update）——`flyway-core` + `V1__baseline.sql`（11 表全量 DDL，自真实 H2 库 `SCRIPT NODATA` 导出、约束名规范化，保证与 Hibernate 6 映射零漂移）+ `ddl-auto: validate` + `baseline-on-migrate: 1`（存量 ./data 库自动打基线，新库正常执行 V1）+ mysql profile 暂停用（`flyway.enabled: false` + `ddl-auto: update`，H2 方言基线不跨库）。2026-11-06 三条路径真实验证：①空库迁移 `mvn test` 225 用例全绿（每个测试上下文空库执行 V1+validate）②存量库 baseline 全程亲测（pre-baseline 11 表库 → 启动自动打 baseline version=1 跳过 V1 → validate 通过 → 老工单/客户数据完好）③基线后幂等启动（Schema up to date. No migration necessary）
@@ -169,15 +169,15 @@ IM 卡片按钮 → IM 平台回调 → ApprovalCallbackController（平台适�
 审批续跑机制（ApprovalService/TicketGraphRunner）一行不改。
 
 任务拆解：
-- [ ] T5.1 标准回调协议 + 策略接口——`com/dolphin/im` 包：`StandardApprovalCommand`（ticketId/approved/approver/reason/callbackId，callbackId 为平台回调唯一号做幂等）+ `ImCallbackAdapter`（platform()/parse(headers,body)→StandardCommand/ack()，验签解密封装在适配器内）
-- [ ] T5.2 钉钉参考适配器——`DingTalkCallbackAdapter`：自实现钉钉开放平台回调加解密协议（msg_signature=SHA1(token,timestamp,nonce,encrypt) 验签 + AES-CBC 解密，零第三方 SDK 依赖，`DingTalkCrypto` 纯函数工具类），回调事件 JSON → 标准指令映射；凭证 token/aes-key 只从环境变量注入
-- [ ] T5.3 回调幂等去重——`im_callback_record` 表（(platform, callback_id) 唯一约束）+ Flyway V2 迁移 + `ImCallbackDedupService`：重复投递直接返回首次处理结果（成功应答防平台重试重复 resume）
-- [ ] T5.4 `ApprovalCallbackController`——`POST /api/im/callback/{platform}`：按 platform 路由适配器 → parse（验签失败 400 拒绝）→ 幂等判重 → 状态闸门（仅 PENDING_APPROVAL 可审，tryTransition 翻转 PROCESSING，并发双审 409 语义同 REST approve）→ recordDecision → enqueueApprovalResume → 审计 `im-approval-callback`；工单不存在/状态不符 → 成功应答 + ignored 标记（防平台无限重试 + 防探测）
-- [ ] T5.5 卡片下发（平台无关事件）——`ApprovalPendingEvent`（ticket.service，`TicketRoundService.completeRound` 落 PENDING_APPROVAL 时发布）+ `ApprovalCardNotifier`（@EventListener，复用 DingTalkNotifier 发 markdown 卡片：工单号/待执行动作/审批说明，未配 webhook 降级审计日志）
-- [ ] T5.6 配置——`dolphin.im.callback.*`（dingtalk token/aes-key，缺省为空=验签必然失败即关闭入口）+ application.yml 环境变量占位
-- [ ] T5.7 单测——`DingTalkCryptoTest`/`DingTalkCallbackAdapterTest`（加解密往返/验签/篡改拒绝/事件映射）+ `ImApprovalCallbackTest`（@SpringBootTest offline：合法回调批准 → resume 结单、拒绝 → 不执行；同 callbackId 重投幂等；非待审批单 ignored；验签失败拒绝；未知平台 404）
-- [ ] T5.8 README 剧本 7：回调审批闭环演示（模拟平台回调 POST → 审批续跑 → 状态/线程/审计验证）+ 钉钉沙箱真机说明与 WeLink 同构话术
-- [ ] T5.9 `mvn test` 全绿 + commit（msg: "阶段5:IM卡片审批(平台无关回调+钉钉参考实现)+回调幂等"）+ PLAN 断点更新
+- [x] T5.1 标准回调协议 + 策略接口——`com/dolphin/im` 包：`StandardApprovalCommand`（ticketId/approved/approver/reason/callbackId，callbackId 为平台回调唯一号做幂等）+ `ImCallbackAdapter`（platform()/parse(headers,body)→StandardCommand/ack()，验签解密封装在适配器内）
+- [x] T5.2 钉钉参考适配器——`DingTalkCallbackAdapter`：自实现钉钉开放平台回调加解密协议（msg_signature=SHA1(token,timestamp,nonce,encrypt) 验签 + AES-CBC 解密，零第三方 SDK 依赖，`DingTalkCrypto` 纯函数工具类），回调事件 JSON → 标准指令映射；凭证 token/aes-key 只从环境变量注入
+- [x] T5.3 回调幂等去重——`im_callback_record` 表（(platform, callback_id) 唯一约束）+ Flyway V2 迁移 + `ImCallbackDedupService`：重复投递直接返回首次处理结果（成功应答防平台重试重复 resume）
+- [x] T5.4 `ApprovalCallbackController`——`POST /api/im/callback/{platform}`：按 platform 路由适配器 → parse（验签失败 400 拒绝）→ 幂等判重 → 状态闸门（仅 PENDING_APPROVAL 可审，tryTransition 翻转 PROCESSING，并发双审 409 语义同 REST approve）→ recordDecision → enqueueApprovalResume → 审计 `im-approval-callback`；工单不存在/状态不符 → 成功应答 + ignored 标记（防平台无限重试 + 防探测）
+- [x] T5.5 卡片下发（平台无关事件）——`ApprovalPendingEvent`（ticket.service，`TicketRoundService.completeRound` 落 PENDING_APPROVAL 时发布）+ `ApprovalCardNotifier`（@EventListener，复用 DingTalkNotifier 发 markdown 卡片：工单号/待执行动作/审批说明，未配 webhook 降级审计日志）
+- [x] T5.6 配置——`dolphin.im.callback.*`（dingtalk token/aes-key，缺省为空=验签必然失败即关闭入口）+ application.yml 环境变量占位
+- [x] T5.7 单测——`DingTalkCryptoTest`/`DingTalkCallbackAdapterTest`（加解密往返/验签/篡改拒绝/事件映射）+ `ImApprovalCallbackTest`（@SpringBootTest offline：合法回调批准 → resume 结单、拒绝 → 不执行；同 callbackId 重投幂等；非待审批单 ignored；验签失败拒绝；未知平台 404）
+- [x] T5.8 README 剧本 7：回调审批闭环演示（模拟平台回调 POST → 审批续跑 → 状态/线程/审计验证）+ 钉钉沙箱真机说明与 WeLink 同构话术
+- [x] T5.9 `mvn test` 全绿 + commit（msg: "阶段5:IM卡片审批(平台无关回调+钉钉参考实现)+回调幂等"）+ PLAN 断点更新
 
 **完成标准**：模拟平台回调（合法签名）POST 到 /api/im/callback/dingtalk 能驱动 PENDING_APPROVAL 单 resume 结单；重投同 callbackId 不重复执行；`mvn test` 全绿；README 有剧本 7。
 
@@ -193,10 +193,10 @@ IM 卡片按钮 → IM 平台回调 → ApprovalCallbackController（平台适�
 
 ## 当前断点（每次会话结束必须更新）
 
-**最后更新**：2026-11-10（第十次会话：新增并置顶「阶段 9 面试冲刺」并完成 T9.2~T9.5——话术稿/数据口径表/兜底口径已入库；T9.1 待 `DOLPHIN_API_KEY`；速读/断点数据校正——37 测试类 225 用例、工作区 dirty 文件如实记录）
-**已完成**：H0~H3；**阶段 1~3 全部完成**（均已 commit）；**阶段 4 全部完成**（commit `f63a28c`）；**阶段 4.1 O1~O7 全部完成**（commit `c945eb8`）；**阶段 4.2 O8 异步化全部完成**（commit `b2e9e7f`）；**P1 全链路可见化完成**（commit `03cff20`：8 节点 traced 审计 + timeline API + 六幕演示剧本）；**阶段 7 CI + 阶段 8 Flyway 完成**（commit `885279c`：CI run 42183646528 全绿 + 空库迁移/存量库 baseline/幂等启动三路径亲测，详见第二梯队条目）；**阶段 9 面试冲刺基本完成**（T9.2~T9.5：`docs/interview-script.md` 话术稿 + 数据口径表 + 兜底口径入库；`docs/real-model-run.md` 执行指引已建；T9.1 真实模型验证轮待 Key）
-**下一步**：阶段 9 仅剩 **T9.1 真实模型验证轮**（拿到 `DOLPHIN_API_KEY` 后按 `docs/real-model-run.md` 执行指引跑六幕剧本并填写记录；无 Key 则维持 T9.4 兜底口径，禁止虚构）；阶段 5 IM 卡片审批为余力再做（T5.1~T5.9 原样保留）；阶段 6 暂缓（2026-11-06 决策，见第二梯队条目）；面试前动作：通读 `docs/interview-script.md` + 模拟追问
-**git 状态**：`885279c` 已推 origin/main（Actions run 42183646528 全绿）；`d6dbe0c`（practice:LeetCode53）与本次三笔提交（practice LC189/238、chore .gitignore、docs PLAN 去重）已推送，origin/master 与 origin/main 对齐同一 HEAD；`LeetcodeTest.java` 口径=刷题题解随做随 commit 入库（`d6dbe0c` 先例，旧「不入库」口径作废）；`.relay/`、`.skills/` 已入 .gitignore；**工作区不干净**：`M src/main/java/com/dolphin/test/LeetcodeTest.java`（刷题练习改动，按 H0 保留，禁止为求 clean 删除或还原）；`docs/` 新增两文件（interview-script.md、real-model-run.md）随本批 commit 入库；远程 master/main 并存，后续推送统一 `git push origin master` + `git push origin master:main`
+**最后更新**：2026-11-27（第十一次会话：完成「阶段 5 IM 卡片审批」全部 T5.1~T5.9——平台无关回调入口 `POST /api/im/callback/{platform}` + 钉钉参考实现（自实现 SHA1 验签 + AES-CBC 加解密应答，零第三方 SDK）+ `im_callback_record` 复合主键幂等 + 审批挂起事件通知 + README 剧本 7 + 演示第八幕回调闭环；全量 `mvn -o test` 47 测试类 300 用例 0 失败；commit `a56d92a` 已推 origin/master 与 origin/master:main）
+**已完成**：H0~H3；**阶段 1~3 全部完成**（均已 commit）；**阶段 4 全部完成**（commit `f63a28c`）；**阶段 4.1 O1~O7 全部完成**（commit `c945eb8`）；**阶段 4.2 O8 异步化全部完成**（commit `b2e9e7f`）；**P1 全链路可见化完成**（commit `03cff20`：8 节点 traced 审计 + timeline API + 六幕演示剧本）；**阶段 7 CI + 阶段 8 Flyway 完成**（commit `885279c`：CI run 42183646528 全绿 + 空库迁移/存量库 baseline/幂等启动三路径亲测，详见第二梯队条目）；**阶段 9 面试冲刺基本完成**（T9.2~T9.5：`docs/interview-script.md` 话术稿 + 数据口径表 + 兜底口径入库；`docs/real-model-run.md` 执行指引已建；T9.1 真实模型验证轮待 Key）；**阶段 5 IM 卡片审批完成**（commit `a56d92a`：`com/dolphin/im` 11 类 + Flyway V2 `im_callback_record` + 4 测试类 39 用例 + README 剧本 7 + 演示第八幕；`origin/master`/`origin/main` 已对齐，工作区干净）
+**下一步**：继续执行「推荐终态改造计划（W1 + D5 + D6）」——D1（= 本文件阶段 5）已闭环；终态锚点为 **D5 持久化**（Flyway V3 `session_context` / V4 `ticket_task`；进程内语义实现，默认 `local`/`direct`，新实现仅以 `@Primary` 可覆盖）与 **D6 架构规则门禁**（`demo/check-arch.ps1`，零依赖、能红能绿）；该计划**尚未落盘**为独立文档，新会话开工前先与会话确认剩余工作包先后。阶段 9 仅剩 **T9.1 真实模型验证轮**（拿到 `DOLPHIN_API_KEY` 后按 `docs/real-model-run.md` 执行指引跑六幕剧本并填写记录；无 Key 则维持 T9.4 兜底口径，禁止虚构）；阶段 6 暂缓（2026-11-06 决策，见第二梯队条目）；面试前动作：通读 `docs/interview-script.md` + 模拟追问
+**git 状态**：`885279c` 已推 origin/main（Actions run 42183646528 全绿）；`d6dbe0c`（practice:LeetCode53）与本次三笔提交（practice LC189/238、chore .gitignore、docs PLAN 去重）已推送，origin/master 与 origin/main 对齐同一 HEAD；`LeetcodeTest.java` 口径=刷题题解随做随 commit 入库（`d6dbe0c` 先例，旧「不入库」口径作废）；`.relay/`、`.skills/` 已入 .gitignore；**工作区不干净**：`M src/main/java/com/dolphin/test/LeetcodeTest.java`（刷题练习改动，按 H0 保留，禁止为求 clean 删除或还原）；`docs/` 新增两文件（interview-script.md、real-model-run.md）随本批 commit 入库；远程 master/main 并存，后续推送统一 `git push origin master` + `git push origin master:main`；**2026-11-27 更新**：阶段 5 经 `a56d92a` 提交推送，`origin/master` 与 `origin/main` 同指 `a56d92a`，工作区干净（候选下一提交=D5 持久化）
 
 ### 已提交的进度凭证（git log 摘要）
 
@@ -212,6 +212,7 @@ IM 卡片按钮 → IM 平台回调 → ApprovalCallbackController（平台适�
 - `P1:全链路可见化(8节点traced审计+timeline API+六幕演示剧本)`（commit `03cff20`，与 CI 提交一同首次推远程）
 - `阶段7+8:GitHub Actions CI(mvn test)+Flyway版本化schema(V1基线替换ddl-auto: update+validate+存量库baseline)`（commit `885279c` 已推 origin/main，Actions run 42183646528 全绿；三条迁移路径真实验证见第二梯队条目）
 - `practice:LeetCode53最大子数组和`（`d6dbe0c`）+ `practice:LeetCode189轮转数组+LeetCode238除自身以外数组的乘积`（本次）——`LeetcodeTest.java` 刷题题解随做随 commit 入库（2026-11-09 口径修正）；`chore: .gitignore 补 .relay/与.skills/`（本次）
+- `阶段5:IM卡片审批(平台无关回调+钉钉参考实现)+回调幂等`（commit `a56d92a`：`com/dolphin/im` 11 类 + Flyway V2 `im_callback_record` 复合主键幂等 + `ApprovalPendingEvent`/`ApprovalCardNotifier` + 4 测试类 39 用例 + README 剧本 7 + `demo/GenDingTalkCallback.java` + walkthrough 第八幕；全量 300 用例/47 类 0 失败；已推 origin/master 与 origin/master:main）
 
 ### 阶段 1 关键落点（面试话术/后续阶段引用）
 
