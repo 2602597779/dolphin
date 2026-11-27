@@ -6,8 +6,10 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * 多实例就绪配置({@code dolphin.cluster.*},P0 三件套接口化)。
  *
  * <p>只放"有真实取舍"的开关:发号策略(local/worker 两套实现都真实存在,
- * 所以值得做成配置切换)。SLA 防重守卫、任务队列、会话存储当前只有<b>一个</b>实现,
- * 不做假开关——那三处靠"接口 + 装配处 {@code @Primary} 覆盖"留口,
+ * 所以值得做成配置切换)。D5 持久化后,任务队列(local/jdbc)与会话存储(local/jdbc)
+ * 也各有了两套真实实现,同样做成配置切换(见 {@link TaskQueueProperties} /
+ * {@link SessionStoreProperties})。SLA 防重守卫目前仍只有<b>一个</b>实现,
+ * 不做假开关——靠"接口 + 装配处 {@code @Primary} 覆盖"留口,
  * 避免出现"配置项写 redis 但根本没有 Redis 实现"的装饰性配置。
  */
 @ConfigurationProperties(prefix = "dolphin.cluster.ticket-id")

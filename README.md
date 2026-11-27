@@ -564,7 +564,7 @@ schema 管理已切 Flyway（见下节）；mysql profile 因基线为 H2 方言
 
 - **V1 基线**（`src/main/resources/db/migration/V1__baseline.sql`）：11 张表全量 DDL。没有手写类型映射，而是从真实 H2 库 `SCRIPT NODATA` 导出后仅规范化约束名——`validate` 会逐列比对（`Instant → timestamp(6) with time zone`、`@Lob → clob`），手写映射必然漂移，导出保证与 Hibernate 6 映射严格一致。
 - **存量库兼容**：`baseline-on-migrate: true` + `baseline-version: 1`——`./data` 旧文件库（ddl-auto 时代建表、无迁移历史）首次启动自动打基线跳过 V1；全新库（测试/新环境）正常执行 V1。空库迁移、完整上下文、存量库 baseline 三条路径均已测试验证。
-- **增量变更**：实体加字段 → 新增 `V2__xxx.sql` → 启动自动迁移并校验。
+- **增量变更**：实体加字段 / 加新表 → 新增 `V2__xxx.sql` → 启动自动迁移并校验。当前已到 `V4`：V2 回调幂等表 `im_callback_record`、V3 会话粘性表 `session_context`、V4 任务留痕表 `ticket_task`。
 - **MySQL profile 暂不启用**：V1 为 H2 方言，真接 MySQL 时另立迁移系列；此前 mysql profile 保持 `ddl-auto: update` + `flyway.enabled: false`。
 
 CI（`.github/workflows/ci.yml`）：push / PR 到 main 自动跑全量 `mvn test`（temurin 21 + Maven 缓存）。测试全部离线自洽（H2 内存库 + dummy key），CI 无需配置任何密钥。
@@ -709,14 +709,14 @@ mvn spring-boot:run -Dspring-boot.run.profiles=offline \
 
 ### 多实例就绪：四处接口留口（`com.dolphin.cluster`）
 
-单机跑得很好，但横向扩到多实例时，有四处**进程内状态**会出问题：两个实例各自发号可能撞号、SLA 巡检会重复处置同一张单、会话状态只活在进程内存里、任务队列只在自己进程内。本项目没有引入真实中间件，而是沿用 `NotifySender` 的同一范式——**接口 + 默认进程内实现 + 配置切换**——把这四处抽出来；将来接 Redis / 号段服务 / MQ 时只换实现类，调用方一行不动。
+单机跑得很好，但横向扩到多实例时，有四处**进程内状态**会出问题：两个实例各自发号可能撞号、SLA 巡检会重复处置同一张单、会话状态只活在进程内存里、任务队列只在自己进程内。本项目没有引入真实中间件，而是沿用 `NotifySender` 的同一范式——**接口 + 默认进程内实现 + 配置切换**——把这四处抽出来；将来接 Redis / 号段服务 / MQ 时只换实现类，调用方一行不动。之后的「D5 持久化」又给**会话存储**与**任务队列**各补了第二套真实实现（直接落在项目自带的 H2/关系库里，不引任何中间件），两套实现之间用配置切换，默认仍是进程内那套。
 
 | 位置 | 接口 | 默认实现（单机） | 多实例时要换什么 |
 |---|---|---|---|
 | 发号器 | `TicketIdGenerator.next()` | `LocalTicketIdGenerator`：`T` + 时间戳 36 进制 + 进程内自增（**逐字节等同改造前**） | 换 Redis `INCR` / 号段服务；或切 `WorkerTicketIdGenerator`（`T` + 相对 2020-01-01 的毫秒 36 进制 + workerId + 序号，workerId 0~1023，越界直接抛错） |
 | SLA 防重 | `SlaBreachGuard.claim(ticketId, at)` | `DbSlaBreachGuard`：条件更新 `set slaBreachAt where id=? and slaBreachAt is null`，返回是否抢到处置权 | **本身已多实例安全**（DB 条件更新即互斥）；留接口是为了能换 Redis `SETNX` 或别的存储 |
-| 会话存储 | `SessionStore`（`getOrCreate` / `save` / `evictExpired` / `size`） | `LocalSessionStore`：`ConcurrentHashMap` + TTL 惰性清理 | 换 Redis Hash；契约是「`getOrCreate` 取对象 → 调用方就地改 → `save(ctx)` 写回」，进程内实现的 `save` 是空操作，外置实现必须真持久化 |
-| 任务队列 | `TicketTaskQueue.submit(Runnable)` | `LocalTicketTaskQueue`：委托既有 `ticketGraphExecutor`；队列满或执行器已关闭返回 `false` | 换 MQ 生产者（提交即返回）；`false` 时调用方就地补偿转人工——这条补偿路径改造前就存在，**拒绝文案改为稳定串**「任务队列背压拒绝(队列已满或执行器已关闭)」，细节留 WARN 日志 |
+| 会话存储 | `SessionStore`（`getOrCreate` / `save` / `evictExpired` / `size`） | `LocalSessionStore`：`ConcurrentHashMap` + TTL 惰性清理；**D5 起另有 `JdbcSessionStore`（共享表 `session_context`），`--dolphin.cluster.session-store.kind=local\|jdbc` 切换** | 换 Redis Hash；契约是「`getOrCreate` 取对象 → 调用方就地改 → `save(ctx)` 写回」，进程内实现的 `save` 是空操作，外置实现必须真持久化 |
+| 任务队列 | `TicketTaskQueue.submit(Runnable)` | `LocalTicketTaskQueue`：委托既有 `ticketGraphExecutor`；队列满或执行器已关闭返回 `false`；**D5 起另有 `JdbcTicketTaskQueue`（共享表 `ticket_task`：投递留痕 + 条件更新抢占 + 终态收口 + 超时巡检标 `STUCK`），`--dolphin.cluster.task-queue.kind=local\|jdbc` 切换** | 换 MQ 生产者（提交即返回）；`false` 时调用方就地补偿转人工——这条补偿路径改造前就存在，**拒绝文案改为稳定串**「任务队列背压拒绝(队列已满或执行器已关闭)」，细节留 WARN 日志 |
 
 配置（`application.yml` 的 `dolphin.cluster` 块，均可环境覆盖）：
 
@@ -726,12 +726,18 @@ dolphin:
     ticket-id:
       strategy: ${DOLPHIN_CLUSTER_TICKET_ID_STRATEGY:local}   # local（默认）| worker
       worker-id: ${DOLPHIN_CLUSTER_WORKER_ID:0}               # 仅 worker 策略使用，0~1023
+    session-store:                                            # D5 持久化
+      kind: ${DOLPHIN_CLUSTER_SESSION_STORE:local}            # local（默认，进程内 Map）| jdbc（共享表 session_context）
+      idle-ttl: ${DOLPHIN_CLUSTER_SESSION_STORE_TTL:30m}      # 会话空闲回收阈值（jdbc 实现由定时巡检清理）
+    task-queue:                                               # D5 持久化
+      kind: ${DOLPHIN_CLUSTER_TASK_QUEUE:local}               # local（默认，委托既有线程池）| jdbc（共享表 ticket_task）
+      stale-after: ${DOLPHIN_CLUSTER_TASK_QUEUE_STALE_AFTER:5m}  # 超这么久仍未收口即判为滞留（巡检标 STUCK）
 ```
 
 要点：
 
 - **默认配置下行为与改造前完全一致**：`strategy=local` 时发号仍是「时间戳 36 进制 + 进程内自增」，SLA 防重仍是「同一张单只处置一次」，会话仍是进程内 Map，任务队列仍委托同一个线程池——**单机语义零变化**。
-- **未来实现用 `@Primary` 覆盖，不用 `@ConditionalOnMissingBean`**：`ClusterConfig` 里 4 个默认 `@Bean` 常驻，未来实现标注 `@Primary` 即可接管，不依赖 bean 注册顺序（只有 `TicketIdGenerator` 用 `@ConditionalOnProperty` 二选一）。
+- **两套真实实现之间用 `@ConditionalOnProperty` 切换，只有一个实现的地方才用 `@Primary` 留口**：发号器（`local|worker`）、会话存储（`local|jdbc`）、任务队列（`local|jdbc`）三处都是「默认实现常驻 + 另一套按 `havingValue` 装配」，默认分支全部带 `matchIfMissing = true`——不配任何参数时行为与改造前逐字节一致；SLA 防重守卫目前只有 DB 条件更新一个实现，继续用 `@Primary` 覆盖留口（不用 `@ConditionalOnMissingBean`，不依赖 bean 注册顺序）。
 - **诚实边界**：这里**没有引入真实 Redis / MQ**，四处默认实现都是进程内的；`WorkerTicketIdGenerator` **不是标准 64 位 Snowflake**——工单号是给人看的字符串，只需跨进程不重复，不需要时钟回拨那套复杂度。
 - **闸门不受影响**：受理闸门是 DB 条件更新（`TicketRepository.transitionStatusIf`），本身就天然多实例安全；本次改造动的是那些真正依赖进程内状态的角落。
 
@@ -753,7 +759,52 @@ DOLPHIN_CLUSTER_TICKET_ID_STRATEGY=worker DOLPHIN_CLUSTER_WORKER_ID=1 mvn spring
 
 对照默认 `local` 策略（`demo/walkthrough.sh` 产出）为 `TMWX1LPWM1` 这类「无横杠」格式——两套实现格式不同、互不干扰。注意属性全名是 `dolphin.cluster.ticket-id.worker-id`，写成 `dolphin.cluster.worker-id` 会被 Spring Boot 当作**未知属性静默忽略**（实例号悄悄退回 0），这也是本轮验证时踩到过的坑。
 
-> 回归口径：默认配置下 `demo/walkthrough.sh` 七幕全通（`EXIT=0`，0 次等待超时），全量 `mvn test` **43 个测试类 261 用例全绿**（多实例改造新增 3 个测试类 12 个用例）。
+### 会话状态与任务留痕落共享表（D5，`session-store` / `task-queue`）
+
+上表里「将来要换」的两处，D5 先换成本项目**自带关系库**的实现（零新增依赖、零中间件），照旧只改参数不改代码：
+
+```bash
+mvn spring-boot:run -Dspring-boot.run.profiles=offline -Dspring-boot.run.arguments="--server.port=39999 --dolphin.cluster.session-store.kind=jdbc --dolphin.cluster.task-queue.kind=jdbc"
+# 等价 env 写法
+DOLPHIN_CLUSTER_SESSION_STORE=jdbc DOLPHIN_CLUSTER_TASK_QUEUE=jdbc mvn spring-boot:run -Dspring-boot.run.profiles=offline
+```
+
+实测（jdbc 双开关起服 + `demo/walkthrough.sh` 八幕全通、`EXIT=0`、0 次等待超时）：
+
+```text
+[dolphin] [main] c.d.cluster.JdbcTicketTaskQueue : [task-queue] 使用共享任务表实现(表 ticket_task):投递留痕+抢占标记+孤儿巡检,workerId=31800@DESKTOP-…
+[dolphin] [main] c.d.router.JdbcSessionStore      : [session-store] 使用共享表实现(表 session_context):多实例共享会话粘性,空闲 TTL=PT30M
+# 第七幕「同意」在 jdbc 模式下仍命中粘性（此时进程内已无 LocalSessionStore Bean，状态只能来自共享表回读）：
+[dolphin] [http-nio-39999-exec-…] c.d.router.IntentRouter : … StickySessionMatcher 命中 … [AUDIT] ticketId=demo-chat action=intent-route params=ticket-flow by STICKY
+```
+
+停服后用 H2 Shell 直连同一个文件库（默认用户 `sa`，空密码）：
+
+```bash
+java -cp $HOME/.m2/repository/com/h2database/h2/2.3.232/h2-2.3.232.jar org.h2.tools.Shell \
+  -url jdbc:h2:file:./data/dolphin -user sa \
+  -sql 'select session_id from session_context; select status, count(*) as n from ticket_task group by status;'
+```
+
+```text
+SESSION_ID
+demo-chat        # 演示会话的粘性状态确实写在共享表里（流程终态清理粘性后 active_capability/pending_ticket_id 为 null）
+demo-gate
+STATUS | N
+DONE   | 10
+RUNNING| 1        # 强杀进程时正在跑的图任务，没等到 finish
+```
+
+再把「进程没了」这个场景单独验证一次（`--dolphin.cluster.task-queue.stale-after=1s` 起服，等巡检跑过）：
+
+```text
+[dolphin] [scheduling-1] c.d.cluster.JdbcTicketTaskQueue : [task-queue] 巡检发现 1 个滞留任务,已标记 STUCK 留痕(不重建执行)
+# 库里对应行：STATUS 由 RUNNING → STUCK，detail 记「滞留超过 PT1S 仍未收口(实例崩溃/任务体随进程丢失),需人工核对」
+```
+
+**诚实边界**：`ticket_task` 只做「投递留痕 + 条件更新抢占（PENDING→RUNNING）+ 终态收口（DONE/FAILED/REJECTED）+ 定时巡检把超时未收口的标 `STUCK`」，**不做跨进程重建执行**——`TicketTaskQueue.submit(Runnable)` 里只有执行体、没有工单号与可恢复意图，图执行随进程消失，这和「真 MQ 消息契约」不是一回事（也正因如此没有引入任何 MQ 客户端，见上文通知链路的 MQ 语义说明）。另：本地 H2 文件库在**硬杀进程**（演示脚本收尾用的 `Stop-Process -Force`）下不保证保留最近若干条提交（本轮实测出现过硬杀前后同一文件库行数不一致），这是 H2 MVStore 的检查点语义；代码里对 `ticket_task` 没有任何 DELETE，生产换 MySQL 时不受此限。
+
+> 回归口径：默认配置下 `demo/walkthrough.sh` 八幕全通（`EXIT=0`，0 次等待超时），全量 `mvn test` **49 个测试类 310 用例全绿**（多实例改造新增 3 类 12 例；D1 IM 卡片审批新增 4 类 39 例；D5 持久化新增 2 类 10 例）。
 
 ## 全链路导览（P1 全链路可见化）
 
@@ -830,4 +881,4 @@ bash demo/walkthrough.sh        # 可选 BASE_URL / API_KEY / IM_TOKEN / IM_AES_
 9. 聊天入口：`ChatController` → `IntentRouter`（六级降级）→ `CapabilityRegistry` → `TicketFlowHandler`（异步受理+粘性审批，图执行投递 `TicketGraphRunner`）
 10. LLM 下游保护：`LlmGuard`（全系统模型调用统一闸：Semaphore 封顶+线性退避重试+指标，`com/dolphin/llm/`）
 11. IM 审批回调：`ApprovalCallbackController` → `ImCallbackAdapter`/`DingTalkCallbackAdapter`（验签+翻译）→ `ImCallbackDedupService`（幂等）→ `ApprovalService` + `TicketGraphRunner#enqueueApprovalResume`（`com/dolphin/im/`）
-10. LLM 下游保护：`LlmGuard`（全系统模型调用统一闸：Semaphore 封顶+线性退避重试+指标，`com/dolphin/llm/`）
+12. 多实例留口与 D5 持久化：`ClusterConfig`（装配）→ `SessionStore`/`LocalSessionStore`/`JdbcSessionStore`、`TicketTaskQueue`/`LocalTicketTaskQueue`/`JdbcTicketTaskQueue`、`TicketIdGenerator` 双实现（`com/dolphin/cluster/`、`com/dolphin/router/`）

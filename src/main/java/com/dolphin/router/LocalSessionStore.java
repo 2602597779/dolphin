@@ -2,6 +2,7 @@ package com.dolphin.router;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -15,9 +16,12 @@ import java.util.concurrent.ConcurrentHashMap;
  * 粘性/待审批状态随会话一起过期,等价于"流程超时自动放弃"。
  *
  * <p>多实例不适用:两个节点各有自己的 Map,会话粘性会在负载均衡下丢失。
- * 多实例部署需提供外部化实现并标 {@code @Primary} 覆盖(见 {@link SessionStore} 契约)。
+ * 多实例部署切 {@code dolphin.cluster.session-store.kind=jdbc}
+ * (共享表实现 {@link JdbcSessionStore},状态放数据库,粘性跨节点可用)。
  */
 @Component
+@ConditionalOnProperty(name = "dolphin.cluster.session-store.kind", havingValue = "local",
+        matchIfMissing = true)
 public class LocalSessionStore implements SessionStore {
 
     private static final Logger log = LoggerFactory.getLogger(LocalSessionStore.class);
@@ -32,6 +36,7 @@ public class LocalSessionStore implements SessionStore {
     /** 测试可注入短 TTL */
     public LocalSessionStore(Duration idleTtl) {
         this.idleTtl = idleTtl;
+        log.info("[session-store] 使用进程内实现(单机语义):会话状态仅本进程可见,空闲 TTL={}", idleTtl);
     }
 
     @Override

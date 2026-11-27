@@ -138,16 +138,30 @@ dolphin:
     # 启动后首次巡检延迟(避开启动高峰)
     scan-initial-delay: ${DOLPHIN_SLA_SCAN_INITIAL_DELAY:30s}
 
-  # ---- 多实例就绪(发号器 / SLA 防重 / 会话 / 任务队列:接口留口,默认单机实现)----
-  # 诚实边界:四处只做「接口 + 默认实现 + 配置切换」,无 Redis/ZooKeeper/真实 MQ 客户端依赖;
+  # ---- 多实例就绪(发号器 / 会话 / 任务队列:接口留口,默认单机实现)---------
+  # 诚实边界:只做「接口 + 默认实现 + 配置切换」,无 Redis/ZooKeeper/真实 MQ 客户端依赖;
   # 单实例行为与抽取前逐字节一致(offline 演示与既有测试基线不受影响)。
-  # 换外部实现只需新增实现类并标 @Primary,调用方(构造注入接口)零改动。
+  # 三处 switch 都是「两套真实实现」之间的切换:发号器 local/worker、会话存储 local/jdbc、
+  # 任务队列 local/jdbc;未列出的 SLA 防重守卫仍单实现,靠装配处 @Primary 覆盖留口。
   cluster:
     ticket-id:
       # 工单号策略:local=单机(时间戳36进制+进程内自增) | worker=带节点号(多实例防同毫秒撞号)
       strategy: ${DOLPHIN_CLUSTER_TICKET_ID_STRATEGY:local}
       # worker 策略的节点编号(0~1023);多实例部署时每节点唯一,越界启动即报错
       worker-id: ${DOLPHIN_CLUSTER_WORKER_ID:0}
+    # D5 持久化:会话状态(路由粘性+待审批工单)放进程内还是共享表
+    session-store:
+      # local=进程内 Map(默认,单机) | jdbc=共享表 session_context(多实例会话粘性跨节点可用)
+      kind: ${DOLPHIN_CLUSTER_SESSION_STORE:local}
+      # jdbc 实现:会话空闲超过该时长即被巡检清理(等价"流程超时自动放弃")
+      idle-ttl: ${DOLPHIN_CLUSTER_SESSION_STORE_TTL:30m}
+    # D5 持久化:图执行任务投递放进程内线程池还是共享任务表
+    task-queue:
+      # local=进程内线程池(默认,投递语义与改造前一致) | jdbc=共享表 ticket_task
+      #   (jdbc 提供:投递留痕+抢占标记+终态收口+孤儿巡检;不提供跨进程重建执行)
+      kind: ${DOLPHIN_CLUSTER_TASK_QUEUE:local}
+      # jdbc 实现:未终态任务滞留超过该时长判定为孤儿(标记 STUCK 告警,不重建执行)
+      stale-after: ${DOLPHIN_CLUSTER_TASK_QUEUE_STALE_AFTER:5m}
 
   # ---- 云服务数据源(可插拔:模拟器 / HTTP 真实云)----------------------------
   # 骨架期全部为 mock 值:provider=sim 时根本不读 cloud.* ;provider=http 时
