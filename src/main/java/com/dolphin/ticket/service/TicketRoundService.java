@@ -1,5 +1,6 @@
 package com.dolphin.ticket.service;
 
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -26,10 +27,13 @@ public class TicketRoundService {
 
     private final ConversationService conversationService;
     private final TicketService ticketService;
+    private final ApplicationEventPublisher events;
 
-    public TicketRoundService(ConversationService conversationService, TicketService ticketService) {
+    public TicketRoundService(ConversationService conversationService, TicketService ticketService,
+                             ApplicationEventPublisher events) {
         this.conversationService = conversationService;
         this.ticketService = ticketService;
+        this.events = events;
     }
 
     /**
@@ -56,6 +60,11 @@ public class TicketRoundService {
         conversationService.appendAgent(ticketId, agentReply);
         if (status != null && !status.isBlank()) {
             ticketService.updateStatus(ticketId, status);
+            if (TicketService.STATUS_PENDING_APPROVAL.equals(status)) {
+                // 挂起待审批 = 通知卡片的触发点。事件在此发布,但消费方声明为 AFTER_COMMIT:
+                // 状态没真提交就不该发卡片,发送动作也不该占着这个事务(见 ApprovalCardNotifier)。
+                events.publishEvent(new ApprovalPendingEvent(ticketId));
+            }
         }
     }
 }

@@ -61,7 +61,7 @@ class ReplyFailureCompensationTest {
     });
 
     private TicketController controller(Executor executor) {
-        TicketRoundService roundService = new TicketRoundService(conversationService, ticketService);
+        TicketRoundService roundService = new TicketRoundService(conversationService, ticketService, event -> { });
         TicketStatusService statusService =
                 new TicketStatusService(ticketService, conversationService, checkpointStore);
         TicketGraphRunner runner = new TicketGraphRunner(compiler, checkpointStore, roundService,

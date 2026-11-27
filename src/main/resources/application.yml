@@ -78,6 +78,20 @@ dolphin:
     # 线性退避基数(毫秒):第 n 次重试前等待 retry-backoff-ms × n
     retry-backoff-ms: ${DOLPHIN_NOTIFY_RETRY_BACKOFF_MS:1000}
 
+  # ---- IM 审批回调(阶段5:审批闭环做进 IM;平台无关入口 + 钉钉参考实现)------------
+  # 坚守边界:适配器只做「平台私有协议 → 标准审批指令」的翻译与来源校验,
+  # 决策落库与图续跑复用既有 ApprovalService / TicketGraphRunner,不新增第二条审批通路。
+  # 指令幂等落库 im_callback_record(同平台同事件只执行一次,重投回放首次结论)。
+  im:
+    callback:
+      dingtalk:
+        # 以下三项留空 = 回调入口默认关闭(适配器自己拒绝并回 400)。不引额外 enabled 开关:
+        # 「没配」与「配错」走同一条可观测失败路径,不存在"配置写错但入口悄悄开着"的灰区。
+        # 生产/联调一律经环境变量注入,凭证不进代码库。
+        token: ${DOLPHIN_IM_DINGTALK_TOKEN:}
+        aes-key: ${DOLPHIN_IM_DINGTALK_AES_KEY:}
+        receive-id: ${DOLPHIN_IM_DINGTALK_RECEIVE_ID:}
+
   approval:
     # 审批令牌有效期(支持 10m/30s 等简写,缺省 10 分钟)
     token-ttl: ${DOLPHIN_APPROVAL_TOKEN_TTL:10m}

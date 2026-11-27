@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Dolphin 全链路导览(P1 全链路可见化):七幕演示剧本,offline profile 零外部依赖。
+# Dolphin 全链路导览(P1 全链路可见化):八幕演示剧本,offline profile 零外部依赖。
 #
 # 用法:
 #   终端一: mvn spring-boot:run -Dspring-boot.run.profiles=offline
 #   终端二: bash demo/walkthrough.sh
 #   可选环境变量: BASE_URL(默认 http://localhost:8080)、API_KEY(默认客户A演示 Key)
+#                 IM_TOKEN / IM_AES_KEY / IM_RECEIVE_ID(第八幕回调验签凭证,需与应用侧启动参数一致)
 #
 # 前六幕统一套路:提交 → 轮询状态 → 打印 GET /api/tickets/{id}/timeline,
 # 时间线里能看到节点轨迹(graph:<node>:enter|exit)、执行器基线/验证、审批决策与质检留痕。
 # 第七幕走聊天入口(POST /api/dolphin/chat,受理即回+「进展」查询),演示异步受理、粘性审批与并发受理闸门。
+# 第八幕走 IM 回调入口(POST /api/im/callback/dingtalk),演示审批闭环搬到 IM:验签 → 幂等 → 闸门 → 决策落库 → resume。
 # ============================================================================
 set -uo pipefail
 
@@ -216,5 +218,71 @@ info "响应 A:"; cat "$GA"
 info "响应 B:"; cat "$GB"
 rm -f "$GA" "$GB"
 info "说明:一条以「已批准」开头(赢家,决策落库后续跑投递异步),另一条为输家(闸门拦截,按实际状态告知:执行中→正在处理中;若赢家已完成→已完成+终稿)"
+
+# ----------------------------------------------------------------------------
+# 第八幕 IM 卡片审批:回调入口驱动 HITL(平台无关入口 + 钉钉参考实现)
+#   代码入口: ApprovalCallbackController.callback → ImCallbackAdapter.parse(验签+协议翻译)
+#            → ImCallbackDedupService(幂等:同平台同事件只执行一次)
+#            → TicketService.tryTransition(状态闸门)→ ApprovalService.recordDecision(决策落库)
+#            → TicketGraphRunner.enqueueApprovalResume(唯一续跑入口)
+#   预期: 8.1 合法签名回调 → 200 + X-Dolphin-Callback-Result: ACCEPTED,工单续跑至 CLOSED;
+#         8.2 同 EventId 重投 → 200 + REPLAYED(回放首次结论,不重复执行);
+#         8.3 篡改签名 → 400(验签失败,状态不变)。
+#   前置: 回调入口默认关闭(凭证留空 = 适配器自己拒绝),第八幕需带凭证启动:
+#         --dolphin.im.callback.dingtalk.token/aes-key/receive-id(见 README 剧本 7)
+#   报文现造: demo/GenDingTalkCallback.java 复用生产实现 DingTalkCrypto(纯 JDK,零 SDK),
+#         以 java 单文件源码模式运行,classpath 只需 target/classes(先 mvn -o -q compile)。
+# ----------------------------------------------------------------------------
+say "第八幕 IM 卡片审批:回调驱动 HITL(验签 → 幂等 → 闸门 → 决策落库 → resume)"
+IM_TOKEN=${IM_TOKEN:-demo-im-token}
+IM_AES_KEY=${IM_AES_KEY:-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG}
+IM_RECEIVE_ID=${IM_RECEIVE_ID:-demo-receive-id}
+CB_URL="$BASE_URL/api/im/callback/dingtalk"
+
+TID8=$(submit_ticket "ECS 服务器 i-abc123 连不上了,请帮我重启实例恢复")
+info "ticketId=$TID8(回调前卡在待审批,等 IM 侧的审批动作)"
+wait_status "$TID8" "PENDING_APPROVAL" || true
+
+TMP8=$(mktemp)          # 只由 bash/sed 读写:原生 Windows curl 拿 MSYS 的 /tmp/xxx 会写不进去
+QUERY8=""; BODY8=""; CODE8=""; RESP8=""
+if command -v java > /dev/null 2>&1 && [ -f target/classes/com/dolphin/im/DingTalkCrypto.class ]; then
+  EVT8="evt-im-$(date +%s)"
+  java -cp target/classes demo/GenDingTalkCallback.java \
+    "$IM_TOKEN" "$IM_AES_KEY" "$IM_RECEIVE_ID" "$TID8" "$EVT8" approve "approver-demo" > "$TMP8"
+  QUERY8=$(sed -n '1p' "$TMP8"); BODY8=$(sed -n '2p' "$TMP8")
+  info "8.1 合法签名回调(EventId=$EVT8 是幂等键,平台重投必带同一个):"
+  # 用 -i 把应答头并进 stdout 再切分,不用 -o/-D 临时文件
+  RESP8=$(curl -s -i -X POST "$CB_URL?$QUERY8" -H "$JSON" --data-binary "$BODY8" | tr -d '\r')
+  CODE8=$(printf '%s\n' "$RESP8" | sed -n '1p' | awk '{print $2}')
+  RESULT8=$(printf '%s\n' "$RESP8" | grep -i '^X-Dolphin-Callback-Result:' | awk '{print $2}')
+  ACK8=$(printf '%s\n' "$RESP8" | awk 'f{print; exit} /^$/{f=1}')
+  info "  HTTP $CODE8 · X-Dolphin-Callback-Result: ${RESULT8:-<无>}"
+  info "  应答体(钉钉要加密应答,回明文会被判失败并重投): $(printf '%s' "$ACK8" | head -c 72)…"
+else
+  CODE8="SKIP"
+fi
+
+if [ "$CODE8" = "200" ]; then
+  info "  回调已受理 → resume 图执行,等结单:"
+  wait_status "$TID8" "CLOSED" || true
+  show_timeline "$TID8"
+
+  info "8.2 同 EventId 重投(平台重投是常态,幂等层须回放首次结论):"
+  RESP8=$(curl -s -i -X POST "$CB_URL?$QUERY8" -H "$JSON" --data-binary "$BODY8" | tr -d '\r')
+  info "  HTTP $(printf '%s\n' "$RESP8" | sed -n '1p' | awk '{print $2}') · X-Dolphin-Callback-Result: $(printf '%s\n' "$RESP8" | grep -i '^X-Dolphin-Callback-Result:' | awk '{print $2}')"
+
+  info "8.3 篡改签名(验签失败 → 400,状态与决策都不动):"
+  TAMPERED8=$(printf '%s' "$QUERY8" | sed 's/msg_signature=[0-9a-fA-F]*/msg_signature=deadbeef/')
+  RESP8=$(curl -s -i -X POST "$CB_URL?$TAMPERED8" -H "$JSON" --data-binary "$BODY8" | tr -d '\r')
+  info "  HTTP $(printf '%s\n' "$RESP8" | sed -n '1p' | awk '{print $2}') · $(printf '%s\n' "$RESP8" | awk 'f{print; exit} /^$/{f=1}')"
+  info "  工单状态(回调被拒,应仍为终态): $(curl -s -H "$AUTH" "$BASE_URL/api/tickets/$TID8/status" | str_field status)"
+elif [ "$CODE8" = "SKIP" ]; then
+  fail "第八幕跳过:找不到 java 或 target/classes —— 先 mvn -o -q compile 再重跑本脚本"
+else
+  fail "第八幕跳过:回调入口未配置凭证(默认关闭,HTTP=${CODE8:-<无>})"
+  fail "  实际响应: $(printf '%s' "$RESP8" | head -c 160)"
+  fail "  带参数重启应用后可复现: --dolphin.im.callback.dingtalk.token/aes-key/receive-id(见 README 剧本 7)"
+fi
+rm -f "$TMP8"
 
 say "导览结束:REST 工单都可用 GET /api/tickets/{id}/timeline 回放完整链路;聊天工单为内部渠道单,按租户隔离对客户 Key 返回 404,链路留痕在审计日志中(内部直调视角可回放)"

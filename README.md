@@ -406,6 +406,87 @@ curl.exe -s --noproxy "*" http://localhost:8080/api/tickets/TMW1IC0QD1/messages 
 - **人工完结回线程（O2）**：`HumanTicketPool.resolve` 把专员答复（或默认结单说明）补成线程末条 AGENT 消息，客户侧线程闭环。
 - **异步受理（O8，已实现）**：submit/reply/approve 受理即返回 `202`（响应体含 `accepted:true` 与 `poll`/`events` 地址，`Location` 头指向轮询端点），图执行移入独立线程池（`dolphin.async.pool-size`），状态机增加 `PROCESSING` 在途态；客户端轮询 `GET /{id}/status`（`done=true` 即本轮有结论）或订阅 `GET /{id}/events`（SSE：连接即推状态快照，本轮完成推 result 事件后关闭）。同单并发由受理闸门原子 UPDATE 串行化（取代 O1 进程内锁，多实例安全）；上一轮 PROCESSING 中拒绝新追问（409）；受理队列满返回 503 并转人工；PROCESSING 卡死由 SLA 响应计时器超时补偿。
 
+### 剧本 7：IM 卡片审批——审批动作搬进 IM（回调入口 + 钉钉参考实现）
+
+场景：审批人不在工单页点「批准」，而是在钉钉里点卡片按钮。平台回调打 `POST /api/im/callback/{platform}`，
+适配器验签 → 翻译成标准审批指令 → 幂等落库 → 状态闸门 → 决策落库 → `enqueueApprovalResume`。
+**审批决策与图续跑完全复用既有通路**，没有第二条审批通路。
+
+入口默认关闭：三个凭证留空 = 整条回调链路不生效（不引额外 `enabled` 开关——「没配」与「配错」走同一条可观测失败路径）。
+
+```bash
+mvn -o spring-boot:run -Dspring-boot.run.profiles=offline \
+  -Dspring-boot.run.arguments="--server.port=39999 \
+    --dolphin.im.callback.dingtalk.token=demo-im-token \
+    --dolphin.im.callback.dingtalk.aes-key=abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG \
+    --dolphin.im.callback.dingtalk.receive-id=demo-receive-id"
+
+BASE_URL=http://localhost:39999 API_KEY=ak-demo-cust-001 \
+IM_TOKEN=demo-im-token IM_AES_KEY=abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG IM_RECEIVE_ID=demo-receive-id \
+bash demo/walkthrough.sh        # 第八幕即本节剧本（八幕全通，0 次「等待状态超时」）
+```
+
+真实输出（offline profile 本地实测）：
+
+```text
+==== 第八幕 IM 卡片审批:回调驱动 HITL(验签 → 幂等 → 闸门 → 决策落库 → resume) ====
+  ticketId=TMWYFSGN77(回调前卡在待审批,等 IM 侧的审批动作)
+  status=PENDING_APPROVAL
+  8.1 合法签名回调(EventId=evt-im-1795751017 是幂等键,平台重投必带同一个):
+    HTTP 200 · X-Dolphin-Callback-Result: ACCEPTED
+    应答体(钉钉要加密应答,回明文会被判失败并重投): {"msg_signature":"85d34cf7…","time":"1795…
+    回调已受理 → resume 图执行,等结单:
+  status=CLOSED
+  8.2 同 EventId 重投(平台重投是常态,幂等层须回放首次结论):
+    HTTP 200 · X-Dolphin-Callback-Result: REPLAYED
+  8.3 篡改签名(验签失败 → 400,状态与决策都不动):
+    HTTP 400 · {"error":"回调验签失败(凭证不匹配或报文被篡改)"}
+    工单状态(回调被拒,应仍为终态): CLOSED
+```
+
+时间线（`GET /api/tickets/{id}/timeline`）能看出这次续跑是回调驱动的——`approval` 节点读到的正是 IM 侧落下的决策：
+
+```text
+{"action":"im-approval-callback","summary":"approved:approver-demo via dingtalk"}
+{"action":"graph:approval:enter","summary":"decision=已记录"}
+{"action":"graph:approval:exit","summary":"approved=true cost=5ms"}
+{"action":"restartInstance:APPROVAL-TOKEN","summary":"令牌校验通过(动作=restartInstance,剩余有效期=599s) target=i-abc123"}
+{"action":"restartInstance:VERIFY","summary":"通过:第3次轮询观测到本次重启(序号 3→4)后状态 RUNNING,耗时 5s"}
+{"action":"graph:followup:exit","summary":"finalStatus=CLOSED replyChars=213 cost=4ms"}
+decisions=[{"approved":true,"approver":"approver-demo","reason":"演示:IM 卡片审批"}]
+nodePath=[triage, diagnosis, reply, approval, execute, followup]
+```
+
+未配凭证时入口自动关闭（红线取证，本地实测）：
+
+```text
+$ curl -i -X POST "http://localhost:39999/api/im/callback/dingtalk?$QUERY" -H 'Content-Type: application/json' --data-binary "$BODY"
+HTTP/1.1 400
+{"error":"钉钉回调未配置(token/aes-key 为空,入口默认关闭)"}
+```
+
+演示报文用生产同一份 `DingTalkCrypto` 生成，避免演示脚本另写一套加解密而漂移：
+
+```bash
+java -cp target/classes demo/GenDingTalkCallback.java <token> <aesKey> <receiveId> <ticketId> <eventId> approve|reject [approver]
+# 第 1 行 = query(timestamp/nonce/msg_signature)，第 2 行 = body {"encrypt":"..."}
+```
+
+设计取舍：
+
+| 决策点 | 取舍 | 原因 |
+|---|---|---|
+| 入口开关 | 凭证留空 = 关闭，**不加** `enabled` 开关 | 「没配」与「配错」同一失败路径，不留「配置写错但入口悄悄开着」的灰区 |
+| 平台适配 | `ImCallbackAdapter` 接口 + `DingTalkCallbackAdapter` 参考实现，Bean 常驻 | 换平台只换适配器；凭证缺失由适配器自己拒绝并回 400（可观测） |
+| 验签/加解密 | 自实现 `SHA1(token,timestamp,nonce,encrypt)` + AES-256-CBC，**零第三方 SDK** | 零新增依赖；应答也必须加密（回明文会被平台判失败并重投） |
+| 幂等 | `im_callback_record(platform, callback_id)` 复合主键，重投回放首次结论 | 平台重投是常态；并发由主键唯一性裁决（吞唯一约束冲突） |
+| 与主流程的关系 | 落决策 + `TicketGraphRunner.enqueueApprovalResume` | 复用既有唯一续跑入口，不新增第二条审批通路（主流程零改动） |
+| 审批挂起通知 | `@TransactionalEventListener(AFTER_COMMIT)` + `NotifySender` | 未配通知通道时降级为审计留痕，不阻塞主流程 |
+
+> ⚠️ 边界声明：**未用真机沙箱对通**——签名/加解密以本地向量交叉验证（`DingTalkCryptoTest` 10 例）；
+> 「卡片」为审批通知消息语义（markdown 通知 + 平台 ActionCard 回调报文解析），不引入平台 SDK；
+> 真机部署需把公网回调地址指向部署机，工单号承载在 `outTrackId` 前缀 `dolphin-approval:`。
+
 ### offline 模式做了什么
 
 - **ChatModel 桩**（`com.dolphin.ticket.offline.ScriptedChatModel`，`@Profile("offline") + @Primary`）：在最底层替换模型输出，按系统提示词特征识别分诊/诊断/问答/回复四类 Agent 调用并返回脚本化文本；真实的 ChatClient 流式 API、graph 编排、审批中断/resume、动作执行器管线全部原样走通。
@@ -721,11 +802,15 @@ curl -s -H "X-API-Key: ak-demo-cust-001" http://localhost:8080/api/tickets/$TID/
 
 ### 演示剧本
 
-`demo/walkthrough.sh` 七幕：咨询单、故障单审批闭环、拒绝单、免审批直执、人工池认领完结、告警链路、聊天异步受理与粘性审批（第七幕走 `POST /api/dolphin/chat`：一句话建单受理即回 → 同会话「同意」闸门+决策落库后续跑投递异步 → 「进展」查询按状态回复 → 并发双发「同意」演示受理闸门，仅一个赢家）。每幕头注释标注「链路环节 → 代码入口(file:line) → 预期响应」。offline profile 下零外部依赖：
+`demo/walkthrough.sh` 八幕：咨询单、故障单审批闭环、拒绝单、免审批直执、人工池认领完结、告警链路、聊天异步受理与粘性审批、IM 卡片审批回调（第七幕走 `POST /api/dolphin/chat`：一句话建单受理即回 → 同会话「同意」闸门+决策落库后续跑投递异步 → 「进展」查询按状态回复 → 并发双发「同意」演示受理闸门，仅一个赢家；第八幕走 `POST /api/im/callback/dingtalk`：合法签名回调 → 幂等 → 闸门 → 决策落库 → resume 图执行，含重投回放与篡改签名拒绝）。每幕头注释标注「链路环节 → 代码入口(file:line) → 预期响应」。offline profile 下零外部依赖：
 
 ```bash
-mvn spring-boot:run -Dspring-boot.run.profiles=offline
-bash demo/walkthrough.sh        # 可选 BASE_URL / API_KEY 环境变量
+# 第八幕需要一个"配了凭证"的回调入口：IM 回调默认留空 = 入口关闭（第八幕会自动跳过并说明原因）。
+# 凭证经启动参数注入，且要与脚本侧 IM_TOKEN / IM_AES_KEY / IM_RECEIVE_ID 一致。
+mvn spring-boot:run -Dspring-boot.run.profiles=offline \
+  -Dspring-boot.run.arguments="--dolphin.im.callback.dingtalk.token=demo-im-token --dolphin.im.callback.dingtalk.aes-key=abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG --dolphin.im.callback.dingtalk.receive-id=demo-receive-id"
+
+bash demo/walkthrough.sh        # 可选 BASE_URL / API_KEY / IM_TOKEN / IM_AES_KEY / IM_RECEIVE_ID 环境变量
 ```
 
 > 端口与编码提示：脚本默认 `BASE_URL=http://localhost:8080`。若 8080 已被其他程序占用（同端口也会回 200，但响应不是工单 JSON），脚本的启动检查会直接失败并打印实际响应体，此时用 `BASE_URL=http://localhost:39999 bash demo/walkthrough.sh` 覆盖。脚本所有请求体经 stdin（`--data-binary @-`）传递——Git Bash 调用原生 curl 时命令行参数中的中文会按系统代码页转换，走 stdin 可避免请求体被破坏。
@@ -743,4 +828,6 @@ bash demo/walkthrough.sh        # 可选 BASE_URL / API_KEY 环境变量
 7. 转人工：`HumanTicketPool` + `HumanTicketController`
 8. 结单质检：`QualityReviewService`
 9. 聊天入口：`ChatController` → `IntentRouter`（六级降级）→ `CapabilityRegistry` → `TicketFlowHandler`（异步受理+粘性审批，图执行投递 `TicketGraphRunner`）
+10. LLM 下游保护：`LlmGuard`（全系统模型调用统一闸：Semaphore 封顶+线性退避重试+指标，`com/dolphin/llm/`）
+11. IM 审批回调：`ApprovalCallbackController` → `ImCallbackAdapter`/`DingTalkCallbackAdapter`（验签+翻译）→ `ImCallbackDedupService`（幂等）→ `ApprovalService` + `TicketGraphRunner#enqueueApprovalResume`（`com/dolphin/im/`）
 10. LLM 下游保护：`LlmGuard`（全系统模型调用统一闸：Semaphore 封顶+线性退避重试+指标，`com/dolphin/llm/`）
